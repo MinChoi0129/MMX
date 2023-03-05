@@ -6,6 +6,8 @@ The codes and dataset will be released when the paper is published.
 ## Environment setting：
 * Python 3.6 or higher
 * Pytorch 1.10 or higher
+* torchvision 0.13.1 or higher
+* numpy 1.19.0 or higher 
 
 ## Dataset
 Download the datasets and then extract it in the file of `Data`
