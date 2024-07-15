@@ -6,6 +6,7 @@ This is the official implementation of Multimodal-XAD.
 * Pytorch 1.10 or higher
 * torchvision 0.13.1 or higher
 * numpy 1.19.0 or higher
+* Install the NuScenes devkit from https://github.com/nutonomy/nuscenes-devkit
 * see details in requirment.txt
 
 ## Dataset
@@ -15,22 +16,23 @@ Download all the compressed file and then extract them in the folder of `project
 
 
 ## Usage
-* Clone this repo.
+* Clone this repo and prepare the environment.
 ```
-git clone 
+git clone https://github.com/lab-sun/Multimodal-XAD.git
 ```
 
-* Download the dataset and put into the file of `Data`;
-
-nuScenes data for the pre-training of the encoder and BEV Module
-nu-A2D for the training of whole model
-
-* Download the pretrained weight and put into the file of `weight` (optional);
-
-* To train the network, use the train.py in the root folder of this project
+* Download the dataset, create the foler `data/trainval/` in the project root, and release the dataset into the `/trainval/`.
+* To pretrain/train the network, use the pretrain.py/train.py.
+* To obatin the prediction results: 1) download the pretrained weight and put into the file of `weight`; 2) use the predict.py.
+* The link for the weight is: 
 
 ## Citation
 If you found this code or dataset are useful in your research, please consider citing
 ```
 ...
 ```
+If you have any questions, pleas feel free to contact us!
+
+Contact: yx.sun@cityu.edu.hk; yuchao.feng@connect.polyu.hk
+
+Website: https://yuxiangsun.github.io/
