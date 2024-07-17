@@ -13,7 +13,7 @@ conda activate Multimodal_XAD
 ## Dataset
 To download the nu-A2D dataset, please refers to: https://drive.google.com/drive/folders/15zQhXqRjs-KmZyCuxsfGbHiaLdpQbHst?usp=drive_link
 
-Download all the compressed files and then extract them into the folder of `project_root/data/trainval/`
+Download all the files and then extract them into the folder of `project_root/data/trainval/`
 
 
 ## Usage
