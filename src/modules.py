@@ -1,4 +1,3 @@
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -6,12 +5,12 @@ from torch.nn import functional as F
 from efficientnet_pytorch import EfficientNet
 from torchvision.models.resnet import resnet18
 
+
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2):
         super().__init__()
 
-        self.up = nn.Upsample(scale_factor=scale_factor, mode='bilinear',
-                              align_corners=True)
+        self.up = nn.Upsample(scale_factor=scale_factor, mode="bilinear", align_corners=True)
 
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
@@ -19,7 +18,8 @@ class Up(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True))
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -31,7 +31,7 @@ class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
         self.trunk = EfficientNet.from_pretrained("efficientnet-b4")
-        self.up1 = Up(448+160, 512)
+        self.up1 = Up(448 + 160, 512)
         # 320+112 for b0/b1; 352+120 for b2; 384+136 for b3; 448+160 for b4; 512+176 for b5; 576+200 for b6, 640+224 for b7
 
     def get_eff_depth(self, x):
@@ -48,15 +48,15 @@ class Encoder(nn.Module):
         for idx, block in enumerate(self.trunk._blocks):
             drop_connect_rate = self.trunk._global_params.drop_connect_rate
             if drop_connect_rate:
-                drop_connect_rate *= float(idx) / len(self.trunk._blocks) # scale drop connect_rate
+                drop_connect_rate *= float(idx) / len(self.trunk._blocks)  # scale drop connect_rate
             x = block(x, drop_connect_rate=drop_connect_rate)
             if prev_x.size(2) > x.size(2):
-                endpoints['reduction_{}'.format(len(endpoints)+1)] = prev_x
+                endpoints["reduction_{}".format(len(endpoints) + 1)] = prev_x
             prev_x = x
 
         # Head
-        endpoints['reduction_{}'.format(len(endpoints)+1)] = x
-        x = self.up1(endpoints['reduction_5'], endpoints['reduction_4'])
+        endpoints["reduction_{}".format(len(endpoints) + 1)] = x
+        x = self.up1(endpoints["reduction_5"], endpoints["reduction_4"])
         # print(x.shape) torch.Size([40, 512, 8, 22])
 
         return x
@@ -80,8 +80,8 @@ class CamEncode(nn.Module):
 
         # Depth
         x = self.depthnet(x)
-        depth = self.get_depth_dist(x[:, :self.D])
-        new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2)
+        depth = self.get_depth_dist(x[:, : self.D])
+        new_x = depth.unsqueeze(1) * x[:, self.D : (self.D + self.C)].unsqueeze(2)
 
         return depth, new_x
 
@@ -96,8 +96,7 @@ class BevEncode(nn.Module):
         super(BevEncode, self).__init__()
 
         trunk = resnet18(pretrained=False, zero_init_residual=True)
-        self.conv1 = nn.Conv2d(inC, 64, kernel_size=7, stride=2, padding=3,
-                               bias=False)
+        self.conv1 = nn.Conv2d(inC, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = trunk.bn1
         self.relu = trunk.relu
 
@@ -105,10 +104,9 @@ class BevEncode(nn.Module):
         self.layer2 = trunk.layer2
         self.layer3 = trunk.layer3
 
-        self.up1 = Up(64+256, 256, scale_factor=4)
+        self.up1 = Up(64 + 256, 256, scale_factor=4)
         self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear',
-                              align_corners=True),
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(256, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -134,10 +132,11 @@ class BevPost(nn.Module):
     def __init__(self, in_channels=4, out_channels=8):
         super(BevPost, self).__init__()
         self.post = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=(2,1), padding=1, bias=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=(2, 1), padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(5, 4), padding=0))
+            nn.MaxPool2d(kernel_size=(5, 4), padding=0),
+        )
 
     def forward(self, x):
         x = self.post(x)
@@ -149,7 +148,7 @@ class ASPPConv(nn.Sequential):
         super(ASPPConv, self).__init__(
             nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
 
@@ -159,23 +158,21 @@ class ASPPPooling(nn.Sequential):
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
     def forward(self, x: torch.Tensor):
         size = x.shape[-2:]
         for mod in self:
             x = mod(x)
-        return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+        return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
 class ASPP(nn.Module):
     def __init__(self, in_channels, atrous_rates, out_channels=256) -> None:
         super(ASPP, self).__init__()
         modules = [
-            nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False),
-                          nn.BatchNorm2d(out_channels),
-                          nn.ReLU())
+            nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU())
         ]
 
         rates = tuple(atrous_rates)
@@ -190,7 +187,7 @@ class ASPP(nn.Module):
             nn.Conv2d(len(self.convs) * out_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
-            nn.Dropout(0.5)
+            nn.Dropout(0.5),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -203,8 +200,7 @@ class ASPP(nn.Module):
 
 class SceneUnder(nn.Sequential):
     def __init__(self, in_channels=512) -> None:
-        super(SceneUnder, self).__init__(
-            ASPP(in_channels, [12, 24, 36]))
+        super(SceneUnder, self).__init__(ASPP(in_channels, [12, 24, 36]))
 
 
 class Embedder(nn.Sequential):
@@ -214,8 +210,9 @@ class Embedder(nn.Sequential):
             nn.BatchNorm2d(out_channels),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(out_channels*22*8, out_channels, bias=True),  # for mobilenet in image of (320*160)
+            nn.Linear(out_channels * 22 * 8, out_channels, bias=True),  # for mobilenet in image of (320*160)
         )
+
 
 class Embedder_lr1(nn.Sequential):
     def __init__(self, in_channels, out_channels):
@@ -225,30 +222,27 @@ class Embedder_lr1(nn.Sequential):
             nn.ReLU(),
         )
 
+
 class Embedder_lr2(nn.Sequential):
     def __init__(self, out_channels):
         super(Embedder_lr2, self).__init__(
             nn.Flatten(),
-            nn.Linear(out_channels*22*8, out_channels, bias=True),  # for mobilenet in image of (320*160)
+            nn.Linear(out_channels * 22 * 8, out_channels, bias=True),  # for mobilenet in image of (320*160)
         )
+
 
 class Embedder_f1(nn.Sequential):
     def __init__(self, in_channels, out_channels):
         super(Embedder_f1, self).__init__(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU()
+            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU()
         )
+
 
 class Embedder_f2(nn.Sequential):
     def __init__(self, out_channels):
-        super(Embedder_f2, self).__init__(
-            nn.Flatten(),
-            nn.Linear(out_channels * 22 * 8, out_channels, bias=True)
-        )
+        super(Embedder_f2, self).__init__(nn.Flatten(), nn.Linear(out_channels * 22 * 8, out_channels, bias=True))
+
 
 class Predictor(nn.Sequential):
-    def __init__(self, num_in, classes ):
-        super(Predictor, self).__init__(
-            nn.Linear(num_in, classes, bias=True)
-        )
+    def __init__(self, num_in, classes):
+        super(Predictor, self).__init__(nn.Linear(num_in, classes, bias=True))

@@ -1,11 +1,8 @@
-
-
 import torch
 from torch import nn
 
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
-from .modules import Encoder, CamEncode, BevEncode, BevPost, \
-    SceneUnder, Embedder_f2, Predictor
+from .modules import Encoder, CamEncode, BevEncode, BevPost, SceneUnder, Embedder_f2, Predictor
 
 
 class LSS(nn.Module):
@@ -14,9 +11,11 @@ class LSS(nn.Module):
         self.grid_conf = grid_conf
         self.data_aug_conf = data_aug_conf
         self.bsize = bsize
-        dx, bx, nx = gen_dx_bx(self.grid_conf['xbound'],
-                                              self.grid_conf['ybound'],
-                                              self.grid_conf['zbound'],)
+        dx, bx, nx = gen_dx_bx(
+            self.grid_conf["xbound"],
+            self.grid_conf["ybound"],
+            self.grid_conf["zbound"],
+        )
         self.dx = nn.Parameter(dx, requires_grad=False)
         self.bx = nn.Parameter(bx, requires_grad=False)
         self.nx = nn.Parameter(nx, requires_grad=False)
@@ -33,12 +32,12 @@ class LSS(nn.Module):
 
         # toggle using QuickCumsum vs. autograd
         self.use_quickcumsum = True
-    
+
     def create_frustum(self):
         # make grid in image plane
-        ogfH, ogfW = self.data_aug_conf['final_dim']
+        ogfH, ogfW = self.data_aug_conf["final_dim"]
         fH, fW = ogfH // self.downsample, ogfW // self.downsample
-        ds = torch.arange(*self.grid_conf['dbound'], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
+        ds = torch.arange(*self.grid_conf["dbound"], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
         D, _, _ = ds.shape
         xs = torch.linspace(0, ogfW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)
         ys = torch.linspace(0, ogfH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)
@@ -60,9 +59,7 @@ class LSS(nn.Module):
         points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
         # cam_to_ego
-        points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
-                            points[:, :, :, :, :, 2:3]
-                            ), 5)
+        points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], points[:, :, :, :, :, 2:3]), 5)
         combine = rots.matmul(torch.inverse(intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
@@ -70,8 +67,7 @@ class LSS(nn.Module):
         return points
 
     def get_cam_feats(self, x):
-        """Return B x N x D x H/downsample x W/downsample x C
-        """
+        """Return B x N x D x H/downsample x W/downsample x C"""
         _, C, imH, imW = x.shape
         B = self.bsize
         N = _ // B
@@ -83,30 +79,36 @@ class LSS(nn.Module):
 
     def voxel_pooling(self, geom_feats, x):
         B, N, D, H, W, C = x.shape
-        Nprime = B*N*D*H*W
+        Nprime = B * N * D * H * W
 
         # flatten x
         x = x.reshape(Nprime, C)
 
         # flatten indices
-        geom_feats = ((geom_feats - (self.bx - self.dx/2.)) / self.dx).long()
+        geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
-        batch_ix = torch.cat([torch.full([Nprime//B, 1], ix,
-                             device=x.device, dtype=torch.long) for ix in range(B)])
+        batch_ix = torch.cat([torch.full([Nprime // B, 1], ix, device=x.device, dtype=torch.long) for ix in range(B)])
         geom_feats = torch.cat((geom_feats, batch_ix), 1)
 
         # filter out points that are outside box
-        kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0])\
-            & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < self.nx[1])\
-            & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < self.nx[2])
+        kept = (
+            (geom_feats[:, 0] >= 0)
+            & (geom_feats[:, 0] < self.nx[0])
+            & (geom_feats[:, 1] >= 0)
+            & (geom_feats[:, 1] < self.nx[1])
+            & (geom_feats[:, 2] >= 0)
+            & (geom_feats[:, 2] < self.nx[2])
+        )
         x = x[kept]
         geom_feats = geom_feats[kept]
 
         # get tensors from the same voxel next to each other
-        ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)\
-            + geom_feats[:, 1] * (self.nx[2] * B)\
-            + geom_feats[:, 2] * B\
+        ranks = (
+            geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)
+            + geom_feats[:, 1] * (self.nx[2] * B)
+            + geom_feats[:, 2] * B
             + geom_feats[:, 3]
+        )
         sorts = ranks.argsort()
         x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
 
@@ -146,9 +148,11 @@ class BEV_TXT(nn.Module):
         self.grid_conf = grid_conf
         self.data_aug_conf = data_aug_conf
         self.bsize = bsize
-        dx, bx, nx = gen_dx_bx(self.grid_conf['xbound'],
-                               self.grid_conf['ybound'],
-                               self.grid_conf['zbound'], )
+        dx, bx, nx = gen_dx_bx(
+            self.grid_conf["xbound"],
+            self.grid_conf["ybound"],
+            self.grid_conf["zbound"],
+        )
         self.dx = nn.Parameter(dx, requires_grad=False)
         self.bx = nn.Parameter(bx, requires_grad=False)
         self.nx = nn.Parameter(nx, requires_grad=False)
@@ -175,9 +179,9 @@ class BEV_TXT(nn.Module):
 
     def create_frustum(self):
         # make grid in image plane
-        ogfH, ogfW = self.data_aug_conf['final_dim']
+        ogfH, ogfW = self.data_aug_conf["final_dim"]
         fH, fW = ogfH // self.downsample, ogfW // self.downsample
-        ds = torch.arange(*self.grid_conf['dbound'], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
+        ds = torch.arange(*self.grid_conf["dbound"], dtype=torch.float).view(-1, 1, 1).expand(-1, fH, fW)
         D, _, _ = ds.shape
         xs = torch.linspace(0, ogfW - 1, fW, dtype=torch.float).view(1, 1, fW).expand(D, fH, fW)
         ys = torch.linspace(0, ogfH - 1, fH, dtype=torch.float).view(1, fH, 1).expand(D, fH, fW)
@@ -199,9 +203,7 @@ class BEV_TXT(nn.Module):
         points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
         # cam_to_ego
-        points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
-                            points[:, :, :, :, :, 2:3]
-                            ), 5)
+        points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], points[:, :, :, :, :, 2:3]), 5)
         combine = rots.matmul(torch.inverse(intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
@@ -209,8 +211,7 @@ class BEV_TXT(nn.Module):
         return points
 
     def get_cam_feats(self, x):
-        """Return B x N x D x H/downsample x W/downsample x C
-        """
+        """Return B x N x D x H/downsample x W/downsample x C"""
         _, C, imH, imW = x.shape
         B = self.bsize
         N = _ // B
@@ -228,24 +229,30 @@ class BEV_TXT(nn.Module):
         x = x.reshape(Nprime, C)
 
         # flatten indices
-        geom_feats = ((geom_feats - (self.bx - self.dx / 2.)) / self.dx).long()
+        geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
-        batch_ix = torch.cat([torch.full([Nprime // B, 1], ix,
-                                         device=x.device, dtype=torch.long) for ix in range(B)])
+        batch_ix = torch.cat([torch.full([Nprime // B, 1], ix, device=x.device, dtype=torch.long) for ix in range(B)])
         geom_feats = torch.cat((geom_feats, batch_ix), 1)
 
         # filter out points that are outside box
-        kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0]) \
-               & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < self.nx[1]) \
-               & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < self.nx[2])
+        kept = (
+            (geom_feats[:, 0] >= 0)
+            & (geom_feats[:, 0] < self.nx[0])
+            & (geom_feats[:, 1] >= 0)
+            & (geom_feats[:, 1] < self.nx[1])
+            & (geom_feats[:, 2] >= 0)
+            & (geom_feats[:, 2] < self.nx[2])
+        )
         x = x[kept]
         geom_feats = geom_feats[kept]
 
         # get tensors from the same voxel next to each other
-        ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B) \
-                + geom_feats[:, 1] * (self.nx[2] * B) \
-                + geom_feats[:, 2] * B \
-                + geom_feats[:, 3]
+        ranks = (
+            geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)
+            + geom_feats[:, 1] * (self.nx[2] * B)
+            + geom_feats[:, 2] * B
+            + geom_feats[:, 3]
+        )
         sorts = ranks.argsort()
         x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
 
@@ -292,5 +299,7 @@ class BEV_TXT(nn.Module):
 
 def compile_model_lss(bsize, grid_conf, data_aug_conf, outC):
     return LSS(bsize, grid_conf, data_aug_conf, outC)
+
+
 def compile_model_onlybev(bsize, grid_conf, data_aug_conf, outC):
     return BEV_TXT(bsize, grid_conf, data_aug_conf, outC)

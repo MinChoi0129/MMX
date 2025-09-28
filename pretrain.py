@@ -3,9 +3,9 @@ from time import time
 import numpy as np
 import os
 import tqdm
-from src.model_BEV_TXT import compile_model_bevtxt
-from src.data import compile_data
-from src.tools import MultiLoss, get_val_info_new
+from src.model_baseline import compile_model_lss
+from src.data_pretrain import compile_data
+from src.tools import SimpleLoss, get_val_info
 
 
 def train(args):
@@ -40,28 +40,28 @@ def train(args):
 
     if not os.path.exists(args.logdir):
         os.mkdir(args.logdir)
-    device = torch.device("cpu") if args.gpuid < 0 else torch.device(f"cuda:{args.gpuid}")
+    device = torch.device("cuda")
 
-    model = compile_model_bevtxt(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
+    model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     if args.checkpoint:
         print("loading", args.checkpoint)
-        model.load_state_dict(torch.load(args.checkpoint), strict=False)
+        model.load_state_dict(torch.load(args.checkpoint), strict=True)
     model.to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
 
+    loss_fn = SimpleLoss().cuda(args.gpuid)
+
     counter = 0
-    best_metric = -float("inf")
+    best_iou = -float("inf")
     for epoch in range(args.nepochs):
         print("--------------Epoch: {}--------------".format(epoch))
         np.random.seed()
         model.train()
-        for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts, descs) in enumerate(
-            tqdm.tqdm(trainloader)
-        ):
+        for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(tqdm.tqdm(trainloader)):
             t0 = time()
             opt.zero_grad()
-            bev_pres, act_pres, desc_pres = model(
+            preds = model(
                 imgs.to(device),
                 rots.to(device),
                 trans.to(device),
@@ -70,10 +70,8 @@ def train(args):
                 post_trans.to(device),
             )
             binimgs = binimgs.to(device)
-            acts = acts.to(device)
-            descs = descs.to(device)
 
-            loss = MultiLoss(bev_pres, act_pres, desc_pres, binimgs, acts, descs, args)
+            loss = loss_fn(preds, binimgs)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             opt.step()
@@ -84,32 +82,20 @@ def train(args):
                 print("Counter{} Train_Loss: {}".format(counter, loss.item()))
 
         # val_info
-        iou_info, category_act, category_desc, act_overall, desc_overall, act_mean, desc_mean = get_val_info_new(
-            model, valloader, device
-        )
-        iou_info = str(iou_info)
+        iou_info_raw, val_loss = get_val_info(model, valloader, loss_fn, device)
+        iou_info = str(iou_info_raw)
         print(iou_info)
-        AD_info = """
-                F1_Action: {0}
-                F1_Description: {1}
-                Action_overall: {2}
-                Description_overall: {3}
-                Action_mean: {4}
-                Description_mean: {5}
-                """.format(
-            category_act, category_desc, act_overall, desc_overall, act_mean, desc_mean
-        )
-        print(AD_info)
+        print("val_loss: {}".format(val_loss))
 
         # Log the val info
-        results_txt = "./logs/train/train_log.txt"
+        results_txt = "./logs/pretrain/pretrain_log.txt"
         with open(results_txt, "a") as f:
-            f.write("Epoch {}\n".format(epoch) + iou_info + "\n" + "F1_info: " + AD_info + "\n\n")
+            f.write("Epoch {}\n".format(epoch) + iou_info + "\n" + "val_loss: " + str(val_loss) + "\n\n")
 
-        # Save the weight
-        current_metric = (act_overall + desc_overall) / 2
-        if current_metric > best_metric:
-            best_metric = current_metric
+        # Save the weight (에폭별 저장)
+        current_iou = iou_info_raw.compute()[2]
+        if current_iou > best_iou:
+            best_iou = current_iou
             best_mname = os.path.join(args.logdir, "best_model.pt")
             print("best model confirmed! saving at epoch {}".format(epoch))
             torch.save(model.state_dict(), best_mname)
@@ -126,19 +112,17 @@ def train(args):
 def parse_args():
     import argparse
 
-    parser = argparse.ArgumentParser(description="pytorch training")
+    parser = argparse.ArgumentParser(description="pytorch pre-training")
     # General Setting
     parser.add_argument("--version", default="trainval", help="[trainval, mini]")
     parser.add_argument("--dataroot", default="./data/")
-    parser.add_argument("--nepochs", default=60, type=int)
+    parser.add_argument("--nepochs", default=30, type=int)
     parser.add_argument("--gpuid", default=0, type=int)
-    parser.add_argument("--logdir", default="./logs/train/model_weights/", help="path for the log file")
-    parser.add_argument(
-        "--bsize", default=8, type=int
-    )  # 10 for b0/b1; 9 for b2; 8 for b3; 6 for b4; 4 for b5; 3 for b6; 2 for b7
+    parser.add_argument("--logdir", default="./logs/pretrain/model_weights/", help="path for the log file")
+    parser.add_argument("--bsize", default=12, type=int)
     parser.add_argument("--nworkers", default=8, type=int)
-    parser.add_argument("--lr", default=1e-4, type=float, help="initial learning rate")
-    parser.add_argument("--wdecay", default=1e-8, type=float, help="weight decay")
+    parser.add_argument("--lr", default=1e-3, type=float, help="initial learning rate")
+    parser.add_argument("--wdecay", default=1e-7, type=float, help="weight decay")
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--seg_classes", default=4, help="number of class in segmentation")
 
@@ -152,7 +136,7 @@ def parse_args():
     parser.add_argument("--final_dim", default=(128, 352))
     parser.add_argument("--bot_pct_lim", default=(0.0, 0.22))
     parser.add_argument("--rot_lim", default=(-5.4, 5.4))
-    parser.add_argument("--rand_flip", default=False, type=bool)
+    parser.add_argument("--rand_flip", default=True, type=bool)
     parser.add_argument("--ncams", default=6, type=int)
 
     args = parser.parse_args()

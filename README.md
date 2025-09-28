@@ -6,8 +6,22 @@ This is the official implementation of Multimodal-XAD.
 ```
 git clone https://github.com/lab-sun/Multimodal-XAD.git
 cd Multimodal-XAD
-conda env create -f environment.yaml --name Multimodal_XAD
-conda activate Multimodal_XAD
+
+conda create -n multimodal_xad python=3.11
+conda activate multimodal_xad
+
+nvcc -V
+conda install -c conda-forge pyquaternion nuscenes-devkit efficientnet_pytorch
+nvcc -V
+conda install -c conda-forge cuda-version=12.8.* cuda-nvcc=12.8.* cuda-cudart=12.8.*
+nvcc -V
+
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+nvcc -V
+
+python
+import torch; print(torch.cuda.is_available()); print(torch.__version__)
+
 ```
 
 ## Dataset
