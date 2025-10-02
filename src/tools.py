@@ -7,7 +7,6 @@ from pyquaternion import Quaternion
 from PIL import Image
 from functools import reduce
 import matplotlib as mpl
-from src.tools import ConfusionMatrix
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt
@@ -268,12 +267,12 @@ def MultiLoss_nobev(act_pre, desc_pre, bev_gt, act_gt, desc_gt, args):
     return loss_all
 
 
-def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple[ConfusionMatrix, torch.Tensor]:
+def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
     model.eval()
     confmat = ConfusionMatrix(4)
     total_loss = 0.0
     print("running eval...")
-    loader = tqdm(valloader) if use_tqdm else valloader
+    loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
         for batch in loader:
             allimgs, rots, trans, intrins, post_rots, post_trans, binimgs = batch
@@ -299,7 +298,7 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
     model.eval()
     confmat = ConfusionMatrix(4)
     print("running eval...")
-    loader = tqdm(valloader) if use_tqdm else valloader
+    loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
         targets_acts = []
         targets_desc = []
@@ -367,7 +366,7 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
 def get_val_info_nobev(model, valloader, device, use_tqdm=True, act_num=4, desc_num=8):
     model.eval()
     print("running eval...")
-    loader = tqdm(valloader) if use_tqdm else valloader
+    loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
         targets_acts = []
         targets_desc = []

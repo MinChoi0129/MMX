@@ -3,6 +3,7 @@ from time import time
 import numpy as np
 import os
 import tqdm
+from torch.utils.tensorboard import SummaryWriter
 from src.model_BEV_TXT import compile_model_bevtxt
 from src.data import compile_data
 from src.tools import MultiLoss, get_val_info_new
@@ -40,6 +41,13 @@ def train(args):
 
     if not os.path.exists(args.logdir):
         os.mkdir(args.logdir)
+
+    # TensorBoard writer 초기화
+    tb_logdir = os.path.join(args.logdir, "tensorboard")
+    if not os.path.exists(tb_logdir):
+        os.mkdir(tb_logdir)
+    writer = SummaryWriter(tb_logdir)
+
     device = torch.device("cpu") if args.gpuid < 0 else torch.device(f"cuda:{args.gpuid}")
 
     model = compile_model_bevtxt(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
@@ -50,16 +58,19 @@ def train(args):
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
 
-    counter = 0
     best_metric = -float("inf")
     for epoch in range(args.nepochs):
         print("--------------Epoch: {}--------------".format(epoch))
         np.random.seed()
         model.train()
+
+        # Train loss 누적을 위한 변수
+        train_loss_sum = 0.0
+        train_batches = 0
+
         for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts, descs) in enumerate(
-            tqdm.tqdm(trainloader)
+            tqdm.tqdm(trainloader, dynamic_ncols=True, ncols=None, desc="Training")
         ):
-            t0 = time()
             opt.zero_grad()
             bev_pres, act_pres, desc_pres = model(
                 imgs.to(device),
@@ -77,11 +88,10 @@ def train(args):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             opt.step()
-            counter += 1
-            t1 = time()
 
-            if counter % 200 == 0:
-                print("Counter{} Train_Loss: {}".format(counter, loss.item()))
+            # Train loss 누적
+            train_loss_sum += loss.item()
+            train_batches += 1
 
         # val_info
         iou_info, category_act, category_desc, act_overall, desc_overall, act_mean, desc_mean = get_val_info_new(
@@ -101,6 +111,9 @@ def train(args):
         )
         print(AD_info)
 
+        # Train loss 평균 계산
+        avg_train_loss = train_loss_sum / train_batches if train_batches > 0 else 0.0
+
         # Log the val info
         results_txt = "./logs/train/train_log.txt"
         with open(results_txt, "a") as f:
@@ -114,6 +127,39 @@ def train(args):
             print("best model confirmed! saving at epoch {}".format(epoch))
             torch.save(model.state_dict(), best_mname)
 
+        # TensorBoard 로깅
+        writer.add_scalar("Loss/Train", avg_train_loss, epoch)
+
+        # Action 카테고리별 F1 점수 기록
+        action_categories = [
+            "Move_forward",
+            "Stop_slow_down",
+            "Turn_left_change_to_left_lane",
+            "Turn_right_change_to_right_lane",
+        ]
+        for i, f1_score in enumerate(category_act):
+            writer.add_scalar(f"F1_Action/{action_categories[i]}", f1_score, epoch)
+
+        # Description 카테고리별 F1 점수 기록
+        desc_categories = [
+            "Traffic_light_allows",
+            "Front_area_is_clear",
+            "Solid_line_on_the_left",
+            "Solid_line_on_the_right",
+            "Front_left_area_is_clear",
+            "Back_left_area_is_clear",
+            "Front_right_area_is_clear",
+            "Back_right_area_is_clear",
+        ]
+        for i, f1_score in enumerate(category_desc):
+            writer.add_scalar(f"F1_Description/{desc_categories[i]}", f1_score, epoch)
+
+        # 전체 메트릭 기록
+        writer.add_scalar("Action_overall", act_overall, epoch)
+        writer.add_scalar("Description_overall", desc_overall, epoch)
+        writer.add_scalar("Action_mean", act_mean, epoch)
+        writer.add_scalar("Description_mean", desc_mean, epoch)
+
         mname = os.path.join(args.logdir, "model{}.pt".format(epoch))
         print("saving", mname)
         torch.save(model.state_dict(), mname)
@@ -121,6 +167,9 @@ def train(args):
 
     with open(results_txt, "a") as f:
         f.write("-" * 100 + "\n")
+
+    # TensorBoard writer 종료
+    writer.close()
 
 
 def parse_args():

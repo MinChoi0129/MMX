@@ -3,12 +3,14 @@ from time import time
 import numpy as np
 import os
 import tqdm
+from torch.utils.tensorboard import SummaryWriter
 from src.model_baseline import compile_model_lss
 from src.data_pretrain import compile_data
 from src.tools import SimpleLoss, get_val_info
 
 
 def train(args):
+    print("Ready for pretraining...")
 
     max_grad_norm = 5.0
     grid_conf = {
@@ -40,7 +42,15 @@ def train(args):
 
     if not os.path.exists(args.logdir):
         os.mkdir(args.logdir)
+
+    # TensorBoard writer 초기화
+    tb_logdir = os.path.join(args.logdir, "tensorboard")
+    if not os.path.exists(tb_logdir):
+        os.mkdir(tb_logdir)
+    writer = SummaryWriter(tb_logdir)
+
     device = torch.device("cuda")
+    print("Device: {}".format(device))
 
     model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     if args.checkpoint:
@@ -52,14 +62,25 @@ def train(args):
 
     loss_fn = SimpleLoss().cuda(args.gpuid)
 
-    counter = 0
-    best_iou = -float("inf")
+    best_iou = 0.0
     for epoch in range(args.nepochs):
         print("--------------Epoch: {}--------------".format(epoch))
         np.random.seed()
         model.train()
-        for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(tqdm.tqdm(trainloader)):
-            t0 = time()
+
+        # Train loss 누적을 위한 변수
+        train_loss_sum = 0.0
+        train_batches = 0
+
+        for batchi, (
+            imgs,
+            rots,
+            trans,
+            intrins,
+            post_rots,
+            post_trans,
+            binimgs,
+        ) in enumerate(tqdm.tqdm(trainloader, dynamic_ncols=True, ncols=None, desc="Training")):
             opt.zero_grad()
             preds = model(
                 imgs.to(device),
@@ -75,11 +96,10 @@ def train(args):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             opt.step()
-            counter += 1
-            t1 = time()
 
-            if counter % 200 == 0:
-                print("Counter{} Train_Loss: {}".format(counter, loss.item()))
+            # Train loss 누적
+            train_loss_sum += loss.item()
+            train_batches += 1
 
         # val_info
         iou_info_raw, val_loss = get_val_info(model, valloader, loss_fn, device)
@@ -87,18 +107,27 @@ def train(args):
         print(iou_info)
         print("val_loss: {}".format(val_loss))
 
+        # Train loss 평균 계산
+        avg_train_loss = train_loss_sum / train_batches if train_batches > 0 else 0.0
+
         # Log the val info
         results_txt = "./logs/pretrain/pretrain_log.txt"
         with open(results_txt, "a") as f:
             f.write("Epoch {}\n".format(epoch) + iou_info + "\n" + "val_loss: " + str(val_loss) + "\n\n")
 
         # Save the weight (에폭별 저장)
-        current_iou = iou_info_raw.compute()[2]
+        current_iou = iou_info_raw.compute()[2].mean().item()
         if current_iou > best_iou:
             best_iou = current_iou
             best_mname = os.path.join(args.logdir, "best_model.pt")
             print("best model confirmed! saving at epoch {}".format(epoch))
             torch.save(model.state_dict(), best_mname)
+
+        # TensorBoard 로깅
+        writer.add_scalar("Loss/Train", avg_train_loss, epoch)
+        writer.add_scalar("Loss/Val", val_loss, epoch)
+        writer.add_scalar("IoU/Val", current_iou, epoch)
+        writer.add_scalar("IoU/Best", best_iou, epoch)
 
         mname = os.path.join(args.logdir, "model{}.pt".format(epoch))
         print("saving", mname)
@@ -107,6 +136,9 @@ def train(args):
 
     with open(results_txt, "a") as f:
         f.write("-" * 100 + "\n")
+
+    # TensorBoard writer 종료
+    writer.close()
 
 
 def parse_args():
