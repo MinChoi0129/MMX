@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import torch
 import torchvision
@@ -294,6 +295,16 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
     return confmat, total_loss
 
 
+def visualize_bev_gt(bev_gt: torch.Tensor):
+    import numpy as np, matplotlib.pyplot as plt, time, os
+
+    if not os.path.exists("bev_prediction_images"):
+        os.makedirs("bev_prediction_images")
+
+    bev_np = bev_gt[0].cpu().numpy()  # [200, 200]
+    plt.imsave(f"bev_prediction_images/bev_gt_map_{time.time()}.png", bev_np, cmap="viridis")
+
+
 def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_num=8):
     model.eval()
     confmat = ConfusionMatrix(4)
@@ -306,17 +317,37 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
         output_desc = []
         act_category = [0.0] * 4
         desc_category = [0.0] * 8
+        inference_times = []
+        is_time_measure = False
 
         for batch in loader:
             allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts_gt, descs_gt = batch
-            bev_pres, act_pres, desc_pres = model(
-                allimgs.to(device),
-                rots.to(device),
-                trans.to(device),
-                intrins.to(device),
-                post_rots.to(device),
-                post_trans.to(device),
-            )
+            # visualize_bev_gt(binimgs.to(device))
+
+            if is_time_measure:
+                # 정확한 추론 시간 측정
+                torch.cuda.synchronize()
+                start_time = time.time()
+                bev_pres, act_pres, desc_pres = model(
+                    allimgs.to(device),
+                    rots.to(device),
+                    trans.to(device),
+                    intrins.to(device),
+                    post_rots.to(device),
+                    post_trans.to(device),
+                )
+                torch.cuda.synchronize()
+                end_time = time.time()
+                inference_times.append(end_time - start_time)
+            else:
+                bev_pres, act_pres, desc_pres = model(
+                    allimgs.to(device),
+                    rots.to(device),
+                    trans.to(device),
+                    intrins.to(device),
+                    post_rots.to(device),
+                    post_trans.to(device),
+                )
             binimgs = binimgs.to(device)
             bev_pres = bev_pres.to(device)
             act_pres = act_pres.to(device)
@@ -350,6 +381,19 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
             desc_category[i] = f1_score(targets_desc[i::desc_num], output_desc[i::desc_num])
         f1_overall_act = f1_score(targets_acts, output_acts, average="macro")
         f1_overall_desc = f1_score(targets_desc, output_desc, average="macro")
+
+        # 추론 시간 통계 계산 및 출력
+        if inference_times:
+            import numpy as np
+
+            times_array = np.array(inference_times)
+            mean_time = np.mean(times_array) * 1000
+            std_time = np.std(times_array) * 1000
+            min_time = np.min(times_array) * 1000
+            max_time = np.max(times_array) * 1000
+            print(
+                f"Inference Time Stats in milliseconds: mean={mean_time:.4f}ms, std={std_time:.4f}ms, min={min_time:.4f}ms, max={max_time:.4f}ms"
+            )
 
     model.train()
     return (
@@ -601,9 +645,15 @@ class ConfusionMatrix(object):
 
     def __str__(self):
         acc_global, acc, iu = self.compute()
-        return ("global correct: {:.1f}\n" "average row correct: {}\n" "IoU: {}\n" "mean IoU: {:.1f}").format(
-            acc_global.item() * 100,
-            ["{:.1f}".format(i) for i in (acc * 100).tolist()],
-            ["{:.1f}".format(i) for i in (iu * 100).tolist()],
-            iu.mean().item() * 100,
-        )
+        class_labels = ["background", "vehicle", "road", "lane"]
+        result = ""
+        result += "Global Accuracy: {:.3f}\n".format(acc_global.item())
+        result += "Per-Class Accuracy : "
+        acc_strs = ["{}: {:.3f}".format(label, acc_val.item()) for label, acc_val in zip(class_labels, acc)]
+        result += ", ".join(acc_strs) + "\n"
+        result += "Per-Class IoU : "
+        iu_strs = ["{}: {:.3f}".format(label, iu_val.item()) for label, iu_val in zip(class_labels, iu)]
+        result += ", ".join(iu_strs) + "\n"
+        result += "Mean IoU (mIoU): {:.3f}\n".format(iu.mean().item())
+        result += "Mean IoU (mIoU w/o background): {:.3f}\n".format(iu[1:].mean().item())
+        return result

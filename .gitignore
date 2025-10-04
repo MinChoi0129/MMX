@@ -2,3 +2,4 @@
 __pycache__
 *.pt
 tensorboard
+logs/author_ver_our_computer

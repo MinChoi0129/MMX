@@ -274,6 +274,20 @@ class SegmentationData(NuscData):
         binimg = self.get_binimg(rec, dataroot)
         act, desc = self.get_txt(rec, dataroot)
 
+        # print("scene token :", rec["scene_token"])
+        # print("current token :", rec["token"])
+        # print("previous token :", rec["prev"])
+        # print("next token :", rec["next"])
+        # print('data["LIDAR_TOP"] :', rec["data"]["LIDAR_TOP"])
+        # print('data["CAM_FRONT"] :', rec["data"]["CAM_FRONT"])
+        # print('data["CAM_FRONT_LEFT"] :', rec["data"]["CAM_FRONT_LEFT"])
+        # print('data["CAM_FRONT_RIGHT"] :', rec["data"]["CAM_FRONT_RIGHT"])
+        # print('data["CAM_BACK"] :', rec["data"]["CAM_BACK"])
+        # print('data["CAM_BACK_LEFT"] :', rec["data"]["CAM_BACK_LEFT"])
+        # print('data["CAM_BACK_RIGHT"] :', rec["data"]["CAM_BACK_RIGHT"])
+        # print("actions :", act)
+        # print("descriptions :", desc)
+
         return imgs, rots, trans, intrins, post_rots, post_trans, binimg, act, desc
 
 

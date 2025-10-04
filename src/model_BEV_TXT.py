@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 
+from src.pretty_print import shprint
+
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
 from .modules import (
     Encoder,
@@ -13,6 +15,7 @@ from .modules import (
     Embedder_f1,
     Embedder_f2,
     Predictor,
+    EncoderViT,
 )
 
 
@@ -37,7 +40,8 @@ class LSS(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        self.encoder = Encoder()
+        # self.encoder = Encoder()
+        self.encoder = EncoderViT()
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
@@ -173,7 +177,8 @@ class BEV_TXT(nn.Module):
         self.frustum = self.create_frustum()
         self.D, _, _, _ = self.frustum.shape
 
-        self.encoder = Encoder()
+        # self.encoder = Encoder()
+        self.encoder = EncoderViT()
         self.sceneunder = SceneUnder()
 
         self.embeder_f1 = Embedder_f1(in_channels=256, out_channels=32)
@@ -293,61 +298,88 @@ class BEV_TXT(nn.Module):
 
         return x
 
+    @staticmethod
+    def visualize_bev_feat(bev: torch.Tensor, isBreak: bool = False, mode: str = "entropy"):
+        import numpy as np, matplotlib.pyplot as plt, time, os
+
+        if not os.path.exists("bev_prediction_images"):
+            os.makedirs("bev_prediction_images")
+
+        if mode == "entropy":
+            bev_np = bev[0].permute(1, 2, 0).cpu().numpy()  # [200, 200, 4]
+            exp_bev = np.exp(bev_np - np.max(bev_np, axis=2, keepdims=True))
+            bev_softmax = exp_bev / np.sum(exp_bev, axis=2, keepdims=True)
+            entropy = -np.sum(bev_softmax * np.log(bev_softmax + 1e-8), axis=2)
+            plt.imsave(f"bev_prediction_images/bev_entropy_{time.time()}.png", entropy, cmap="viridis")
+        elif mode == "integer_map":
+            bev_np = bev[0].permute(1, 2, 0).cpu().numpy()  # [200, 200, 4]
+            integer_map = np.argmax(bev_np, axis=2)
+            plt.imsave(f"bev_prediction_images/bev_integer_map_{time.time()}.png", integer_map, cmap="viridis")
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+
+        if isBreak:
+            raise Exception("Image has been saved.")
+
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        x = self.encoder(x)
+        # x: [B, N=6, C=3, H=128, W=352]
+        x = self.encoder(x)  # [B*N, 512, 8, 22]
 
         # BEV part
-        y2 = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
-        bev = self.bevencode(y2)
+        y2 = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)  # [B, 64, 200, 200]
+        bev = self.bevencode(y2)  # [B, 4, 200, 200]
+        # self.visualize_bev_feat(bev, isBreak=False, mode="entropy")
+        # self.visualize_bev_feat(bev, isBreak=True, mode="integer_map")
 
         bev_post = bev.detach()
-        bev_post = bev_post[:, :, 60:140, 56:144]
-        bev_post = self.bevpost(bev_post)
+        bev_post = bev_post[:, :, 60:140, 56:144]  # [B, 4, 80, 88]
+        bev_post = self.bevpost(bev_post)  # [B, 8, 8, 22]
 
         # TXT part
-        y1 = self.sceneunder(x)
+        y1 = self.sceneunder(x)  # [B*N, 256, 8, 22]
 
         # select the features of corresponding cameras
-        y_l_1 = y1[0 :: (self.data_aug_conf["Ncams"]),]
-        y_f = y1[1 :: self.data_aug_conf["Ncams"],]
-        y_r_1 = y1[2 :: (self.data_aug_conf["Ncams"]),]
-        y_l_2 = y1[3 :: (self.data_aug_conf["Ncams"]),]
-        y_r_2 = y1[5 :: (self.data_aug_conf["Ncams"]),]
+        y_l_1 = y1[0 :: (self.data_aug_conf["Ncams"]),]  # [B, 256, 8, 22]
+        y_f = y1[1 :: self.data_aug_conf["Ncams"],]  # [B, 256, 8, 22]
+        y_r_1 = y1[2 :: (self.data_aug_conf["Ncams"]),]  # [B, 256, 8, 22]
+        y_l_2 = y1[3 :: (self.data_aug_conf["Ncams"]),]  # [B, 256, 8, 22]
+        y_r_2 = y1[5 :: (self.data_aug_conf["Ncams"]),]  # [B, 256, 8, 22]
 
         # for front camera
-        y_f = self.embeder_f1(y_f)
-        y_f = torch.cat([y_f, bev_post], dim=1)
-        y_f = self.embeder_f2(y_f)
+        y_f = self.embeder_f1(y_f)  # [B, 32, 8, 22]
+        y_f = torch.cat([y_f, bev_post], dim=1)  # [B, 40, 8, 22]
+        y_f = self.embeder_f2(y_f)  # [B, 40]
 
-        desc_f = self.predictorf1(y_f)
-        act_f = self.predictorf2(y_f)
+        desc_f = self.predictorf1(y_f)  # [B, 4]
+        act_f = self.predictorf2(y_f)  # [B, 4]
 
         # for left front cameras
-        y_l_1 = self.embeder_lr1(y_l_1)
-        y_l_1 = torch.cat([y_l_1, bev_post], dim=1)
-        y_l_1 = self.embeder_lr2(y_l_1)
-        desc_l1 = self.predictorlr(y_l_1)
+        y_l_1 = self.embeder_lr1(y_l_1)  # [B, 32, 8, 22]
+        y_l_1 = torch.cat([y_l_1, bev_post], dim=1)  # [B, 40, 8, 22]
+        y_l_1 = self.embeder_lr2(y_l_1)  # [B, 40]
+        desc_l1 = self.predictorlr(y_l_1)  # [B, 1]
 
         # for right front cameras
-        y_r_1 = self.embeder_lr1(y_r_1)
-        y_r_1 = torch.cat([y_r_1, bev_post], dim=1)
-        y_r_1 = self.embeder_lr2(y_r_1)
-        desc_r1 = self.predictorlr(y_r_1)
+        y_r_1 = self.embeder_lr1(y_r_1)  # [B, 32, 8, 22]
+        y_r_1 = torch.cat([y_r_1, bev_post], dim=1)  # [B, 40, 8, 22]
+        y_r_1 = self.embeder_lr2(y_r_1)  # [B, 40]
+        desc_r1 = self.predictorlr(y_r_1)  # [B, 1]
 
         # for left back cameras
-        y_l_2 = self.embeder_lr1(y_l_2)
-        y_l_2 = torch.cat([y_l_2, bev_post], dim=1)
-        y_l_2 = self.embeder_lr2(y_l_2)
-        desc_l2 = self.predictorlr(y_l_2)
+        y_l_2 = self.embeder_lr1(y_l_2)  # [B, 32, 8, 22]
+        y_l_2 = torch.cat([y_l_2, bev_post], dim=1)  # [B, 40, 8, 22]
+        y_l_2 = self.embeder_lr2(y_l_2)  # [B, 40]
+        desc_l2 = self.predictorlr(y_l_2)  # [B, 1]
 
-        # for left back cameras
-        y_r_2 = self.embeder_lr1(y_r_2)
-        y_r_2 = torch.cat([y_r_2, bev_post], dim=1)
-        y_r_2 = self.embeder_lr2(y_r_2)
-        desc_r2 = self.predictorlr(y_r_2)
+        # for right back cameras
+        y_r_2 = self.embeder_lr1(y_r_2)  # [B, 32, 8, 22]
+        y_r_2 = torch.cat([y_r_2, bev_post], dim=1)  # [B, 40, 8, 22]
+        y_r_2 = self.embeder_lr2(y_r_2)  # [B, 40]
+        desc_r2 = self.predictorlr(y_r_2)  # [B, 1]
 
-        desc = torch.cat([desc_f, desc_l1, desc_l2, desc_r1, desc_r2], dim=1)
+        desc = torch.cat([desc_f, desc_l1, desc_l2, desc_r1, desc_r2], dim=1)  # [B, 8]
 
+        # [B, 4, 200, 200], [B, 4], [B, 8]
         return bev, act_f, desc
 
 

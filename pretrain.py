@@ -41,12 +41,11 @@ def train(args):
     )
 
     if not os.path.exists(args.logdir):
-        os.mkdir(args.logdir)
+        os.makedirs(args.logdir, exist_ok=True)
 
     # TensorBoard writer 초기화
     tb_logdir = os.path.join(args.logdir, "tensorboard")
-    if not os.path.exists(tb_logdir):
-        os.mkdir(tb_logdir)
+    os.makedirs(tb_logdir, exist_ok=True)
     writer = SummaryWriter(tb_logdir)
 
     device = torch.device("cuda")

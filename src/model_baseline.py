@@ -1,8 +1,10 @@
 import torch
 from torch import nn
 
+from src.pretty_print import shprint
+
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
-from .modules import Encoder, CamEncode, BevEncode, BevPost, SceneUnder, Embedder_f2, Predictor
+from .modules import Encoder, CamEncode, BevEncode, BevPost, SceneUnder, Embedder_f2, Predictor, EncoderViT
 
 
 class LSS(nn.Module):
@@ -26,7 +28,9 @@ class LSS(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        self.encoder = Encoder()
+        # self.encoder = Encoder()
+        self.encoder = EncoderViT()
+
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
@@ -163,7 +167,8 @@ class BEV_TXT(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        self.encoder = Encoder()
+        # self.encoder = Encoder()
+        self.encoder = EncoderViT()
         self.sceneunder = SceneUnder()
 
         self.embeder_bev = Embedder_f2(out_channels=8)

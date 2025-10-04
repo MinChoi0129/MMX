@@ -100,22 +100,19 @@ def bev_txt_pred(args):
     )
     iou_info = str(iou_info)
     print(iou_info)
-    AD_info = """
-                    F1_Action: {0}
-                    F1_Description: {1}
-                    Action_overall: {2}
-                    Description_overall: {3}
-                    Action_mean: {4}
-                    Description_mean: {5}
-                    """.format(
-        category_act, category_desc, act_overall, desc_overall, act_mean, desc_mean
-    )
+    AD_info = ""
+    AD_info += "F1_Action: {}\n".format(["{:.3f}".format(x) for x in category_act])
+    AD_info += "F1_Description: {}\n".format(["{:.3f}".format(x) for x in category_desc])
+    AD_info += "F1_Action_Overall: {:.3f}\n".format(act_overall)
+    AD_info += "F1_Description_Overall: {:.3f}\n".format(desc_overall)
+    AD_info += "F1_Action_Mean: {:.3f}\n".format(act_mean)
+    AD_info += "F1_Description_Mean: {:.3f}\n".format(desc_mean)
     print(AD_info)
 
     # Log the val info
     results_txt = "./logs/test/test_log.txt"
     with open(results_txt, "a") as f:
-        f.write(args.checkpoint + "\n" + iou_info + "\n" + "F1_info: " + AD_info + "\n\n" + "-" * 100 + "\n")
+        f.write(args.checkpoint + "\n" + iou_info + "\n" + AD_info + "-" * 100 + "\n")
 
 
 def parse_args():
