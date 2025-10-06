@@ -285,7 +285,8 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
                 post_rots.to(device),
                 post_trans.to(device),
             )
-            binimgs = binimgs.to(device)
+            # binimgs = binimgs.to(device)
+            binimgs = binimgs.to(device)[:, -1, :, :]
 
             total_loss += loss_fn(preds, binimgs).item() * preds.shape[0]
             confmat.update(binimgs.flatten(), preds.argmax(1).flatten())

@@ -40,8 +40,8 @@ class LSS(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        # self.encoder = Encoder()
-        self.encoder = EncoderViT()
+        self.encoder = Encoder()
+        # self.encoder = EncoderViT()
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
@@ -177,8 +177,8 @@ class BEV_TXT(nn.Module):
         self.frustum = self.create_frustum()
         self.D, _, _, _ = self.frustum.shape
 
-        # self.encoder = Encoder()
-        self.encoder = EncoderViT()
+        self.encoder = Encoder()
+        # self.encoder = EncoderViT()
         self.sceneunder = SceneUnder()
 
         self.embeder_f1 = Embedder_f1(in_channels=256, out_channels=32)

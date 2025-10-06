@@ -28,8 +28,8 @@ class LSS(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        # self.encoder = Encoder()
-        self.encoder = EncoderViT()
+        self.encoder = Encoder()
+        # self.encoder = EncoderViT()
 
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
@@ -135,15 +135,47 @@ class LSS(nn.Module):
         geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans)
         x = self.get_cam_feats(x)
         x = self.voxel_pooling(geom, x)
-
         return x
+
+    def stage_forward(
+        self, x_single, rots_single, trans_single, intrins_single, post_rots_single, post_trans_single, deep_feature
+    ):
+        x_single, deep_feature = self.encoder(x_single, deep_feature)
+        x_single = self.get_voxels(
+            x_single, rots_single, trans_single, intrins_single, post_rots_single, post_trans_single
+        )
+        x_single = self.bevencode(x_single)
+        return x_single, deep_feature
 
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        x = self.encoder(x)
-        # print(x.shape) # torch.Size([40, 512, 8, 22])
-        x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
-        x = self.bevencode(x)
-        return x
+        T = x.shape[1]  # time size
+
+        x_single, deep_feature = None, None
+        for t in range(T):
+            x_single = x[:, t, :, :, :, :].contiguous()
+            rots_single = rots[:, t, :, :, :].contiguous()
+            trans_single = trans[:, t, :, :].contiguous()
+            intrins_single = intrins[:, t, :, :, :].contiguous()
+            post_rots_single = post_rots[:, t, :, :, :].contiguous()
+            post_trans_single = post_trans[:, t, :, :].contiguous()
+
+            x_single, deep_feature = self.stage_forward(
+                x_single,
+                rots_single,
+                trans_single,
+                intrins_single,
+                post_rots_single,
+                post_trans_single,
+                deep_feature,
+            )
+
+        return x_single
+
+    # def forward(self, x, rots, trans, intrins, post_rots, post_trans):
+    #     x = self.encoder(x)
+    #     x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
+    #     x = self.bevencode(x)
+    #     return x
 
 
 class BEV_TXT(nn.Module):
@@ -167,8 +199,8 @@ class BEV_TXT(nn.Module):
         self.D, _, _, _ = self.frustum.shape
         # print(self.D, self.camC) 41,64
 
-        # self.encoder = Encoder()
-        self.encoder = EncoderViT()
+        self.encoder = Encoder()
+        # self.encoder = EncoderViT()
         self.sceneunder = SceneUnder()
 
         self.embeder_bev = Embedder_f2(out_channels=8)
@@ -303,8 +335,8 @@ class BEV_TXT(nn.Module):
 
 
 def compile_model_lss(bsize, grid_conf, data_aug_conf, outC):
-    return LSS(bsize, grid_conf, data_aug_conf, outC)
+    return torch.compile(LSS(bsize, grid_conf, data_aug_conf, outC))
 
 
 def compile_model_onlybev(bsize, grid_conf, data_aug_conf, outC):
-    return BEV_TXT(bsize, grid_conf, data_aug_conf, outC)
+    return torch.compile(BEV_TXT(bsize, grid_conf, data_aug_conf, outC))

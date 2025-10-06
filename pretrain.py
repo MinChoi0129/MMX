@@ -1,4 +1,6 @@
 import torch
+
+torch.set_float32_matmul_precision("high")
 from time import time
 import numpy as np
 import os
@@ -30,6 +32,8 @@ def train(args):
         "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
         "Ncams": args.ncams,
     }
+
+    print("Compiling data...")
     trainloader, valloader = compile_data(
         args.version,
         args.dataroot,
@@ -51,17 +55,23 @@ def train(args):
     device = torch.device("cuda")
     print("Device: {}".format(device))
 
+    print("Compiling model...")
     model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     if args.checkpoint:
         print("loading", args.checkpoint)
         model.load_state_dict(torch.load(args.checkpoint), strict=True)
+
     model.to(device)
+
+    for param in model.encoder.parameters():
+        param.requires_grad = True
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
 
     loss_fn = SimpleLoss().cuda(args.gpuid)
 
     best_iou = 0.0
+    print("Start training...")
     for epoch in range(args.nepochs):
         print("--------------Epoch: {}--------------".format(epoch))
         np.random.seed()
@@ -89,7 +99,8 @@ def train(args):
                 post_rots.to(device),
                 post_trans.to(device),
             )
-            binimgs = binimgs.to(device)
+            # binimgs = binimgs.to(device)
+            binimgs = binimgs.to(device)[:, -1, :, :]
 
             loss = loss_fn(preds, binimgs)
             loss.backward()
@@ -110,11 +121,13 @@ def train(args):
         avg_train_loss = train_loss_sum / train_batches if train_batches > 0 else 0.0
 
         # Log the val info
+        print("Logging the val info...")
         results_txt = "./logs/pretrain/pretrain_log.txt"
         with open(results_txt, "a") as f:
             f.write("Epoch {}\n".format(epoch) + iou_info + "\n" + "val_loss: " + str(val_loss) + "\n\n")
 
         # Save the weight (에폭별 저장)
+        print("Saving the weight...")
         current_iou = iou_info_raw.compute()[2].mean().item()
         if current_iou > best_iou:
             best_iou = current_iou
@@ -147,10 +160,11 @@ def parse_args():
     # General Setting
     parser.add_argument("--version", default="trainval", help="[trainval, mini]")
     parser.add_argument("--dataroot", default="./data/")
-    parser.add_argument("--nepochs", default=30, type=int)
+    parser.add_argument("--nepochs", default=30, type=int)  # 기존
+    # parser.add_argument("--nepochs", default=60, type=int)  # vit용
     parser.add_argument("--gpuid", default=0, type=int)
     parser.add_argument("--logdir", default="./logs/pretrain/model_weights/", help="path for the log file")
-    parser.add_argument("--bsize", default=12, type=int)
+    parser.add_argument("--bsize", default=7, type=int)
     parser.add_argument("--nworkers", default=8, type=int)
     parser.add_argument("--lr", default=1e-3, type=float, help="initial learning rate")
     parser.add_argument("--wdecay", default=1e-7, type=float, help="weight decay")
