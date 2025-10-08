@@ -1,7 +1,6 @@
 import torch
 
 torch.set_float32_matmul_precision("high")
-from time import time
 import numpy as np
 import os
 import tqdm
@@ -11,29 +10,18 @@ from src.data_pretrain import compile_data
 from src.tools import SimpleLoss, get_val_info
 
 
-def train(args):
-    print("Ready for pretraining...")
+def pretrain(args, grid_conf, data_aug_conf, max_grad_norm):
+    print("[Info] Ready for pretraining...")
+    device = torch.device("cuda:0")
+    print("[Info] Device: {}".format(device))
 
-    max_grad_norm = 5.0
-    grid_conf = {
-        "xbound": args.xbound,
-        "ybound": args.ybound,
-        "zbound": args.zbound,
-        "dbound": args.dbound,
-    }
-    data_aug_conf = {
-        "resize_lim": args.resize_lim,
-        "final_dim": args.final_dim,
-        "rot_lim": args.rot_lim,
-        "H": args.H,
-        "W": args.W,
-        "rand_flip": args.rand_flip,
-        "bot_pct_lim": args.bot_pct_lim,
-        "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
-        "Ncams": args.ncams,
-    }
+    print("[Info] Creating log directory...")
+    tb_logdir = os.path.join(args.logdir, "tensorboard")
+    if not os.path.exists(tb_logdir):
+        os.makedirs(tb_logdir, exist_ok=True)
+    writer = SummaryWriter(tb_logdir)
 
-    print("Compiling data...")
+    print("[Info] Compiling data...")
     trainloader, valloader = compile_data(
         args.version,
         args.dataroot,
@@ -41,55 +29,30 @@ def train(args):
         grid_conf=grid_conf,
         bsz=args.bsize,
         nworkers=args.nworkers,
-        parser_name="segmentationdata",
     )
 
-    if not os.path.exists(args.logdir):
-        os.makedirs(args.logdir, exist_ok=True)
-
-    # TensorBoard writer 초기화
-    tb_logdir = os.path.join(args.logdir, "tensorboard")
-    os.makedirs(tb_logdir, exist_ok=True)
-    writer = SummaryWriter(tb_logdir)
-
-    device = torch.device("cuda")
-    print("Device: {}".format(device))
-
-    print("Compiling model...")
+    print("[Info] Preparing model, optimizer, and loss function...")
     model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
-    if args.checkpoint:
-        print("loading", args.checkpoint)
-        model.load_state_dict(torch.load(args.checkpoint), strict=True)
-
-    model.to(device)
-
     for param in model.encoder.parameters():
         param.requires_grad = True
-
+    model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
-
-    loss_fn = SimpleLoss().cuda(args.gpuid)
+    loss_fn = SimpleLoss().to(device)
 
     best_iou = 0.0
-    print("Start training...")
+    print("[Info] Start training...")
     for epoch in range(args.nepochs):
         print("--------------Epoch: {}--------------".format(epoch))
         np.random.seed()
         model.train()
 
-        # Train loss 누적을 위한 변수
+        # Train loss accumulation
         train_loss_sum = 0.0
         train_batches = 0
 
-        for batchi, (
-            imgs,
-            rots,
-            trans,
-            intrins,
-            post_rots,
-            post_trans,
-            binimgs,
-        ) in enumerate(tqdm.tqdm(trainloader, dynamic_ncols=True, ncols=None, desc="Training")):
+        # Train loop
+        pbar = tqdm.tqdm(trainloader, dynamic_ncols=True, ncols=None, desc="Training")
+        for imgs, rots, trans, intrins, post_rots, post_trans, binimgs in pbar:
             opt.zero_grad()
             preds = model(
                 imgs.to(device),
@@ -99,57 +62,53 @@ def train(args):
                 post_rots.to(device),
                 post_trans.to(device),
             )
-            # binimgs = binimgs.to(device)
-            binimgs = binimgs.to(device)[:, -1, :, :]
 
+            binimgs = binimgs.to(device)[:, -1, :, :]
             loss = loss_fn(preds, binimgs)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             opt.step()
 
-            # Train loss 누적
             train_loss_sum += loss.item()
             train_batches += 1
 
-        # val_info
+        # Evaluation
+        print("[Info] Running eval...")
         iou_info_raw, val_loss = get_val_info(model, valloader, loss_fn, device)
         iou_info = str(iou_info_raw)
         print(iou_info)
-        print("val_loss: {}".format(val_loss))
 
-        # Train loss 평균 계산
-        avg_train_loss = train_loss_sum / train_batches if train_batches > 0 else 0.0
-
-        # Log the val info
-        print("Logging the val info...")
-        results_txt = "./logs/pretrain/pretrain_log.txt"
-        with open(results_txt, "a") as f:
-            f.write("Epoch {}\n".format(epoch) + iou_info + "\n" + "val_loss: " + str(val_loss) + "\n\n")
-
-        # Save the weight (에폭별 저장)
-        print("Saving the weight...")
+        # Saving
+        print("[Info] Saving the weight...")
+        mname = os.path.join(args.logdir, "model{}.pt".format(epoch))
+        torch.save(model.state_dict(), mname)
         current_iou = iou_info_raw.compute()[2].mean().item()
         if current_iou > best_iou:
+            print("[Info] Best model confirmed! Saving at epoch {}".format(epoch))
             best_iou = current_iou
             best_mname = os.path.join(args.logdir, "best_model.pt")
-            print("best model confirmed! saving at epoch {}".format(epoch))
             torch.save(model.state_dict(), best_mname)
 
-        # TensorBoard 로깅
-        writer.add_scalar("Loss/Train", avg_train_loss, epoch)
-        writer.add_scalar("Loss/Val", val_loss, epoch)
-        writer.add_scalar("IoU/Val", current_iou, epoch)
-        writer.add_scalar("IoU/Best", best_iou, epoch)
+        # Logging
+        print("[Info] Logging the val info...")
+        with open("./logs/pretrain/pretrain_log.txt", "a") as f:
+            # Text Logging
+            write_str = ""
+            write_str += f"Epoch {epoch}\n"
+            write_str += f"{iou_info}\n"
+            write_str += f"val_loss: {val_loss}\n"
+            write_str += "-" * 100 + "\n"
+            f.write(write_str)
 
-        mname = os.path.join(args.logdir, "model{}.pt".format(epoch))
-        print("saving", mname)
-        torch.save(model.state_dict(), mname)
+            # TensorBoard Logging
+            avg_train_loss = train_loss_sum / train_batches if train_batches > 0 else 0.0
+            writer.add_scalar("Loss/Train", avg_train_loss, epoch)
+            writer.add_scalar("Loss/Val", val_loss, epoch)
+            writer.add_scalar("IoU/Val", current_iou, epoch)
+            writer.add_scalar("IoU/Best", best_iou, epoch)
+
         model.train()
 
-    with open(results_txt, "a") as f:
-        f.write("-" * 100 + "\n")
-
-    # TensorBoard writer 종료
     writer.close()
 
 
@@ -160,8 +119,7 @@ def parse_args():
     # General Setting
     parser.add_argument("--version", default="trainval", help="[trainval, mini]")
     parser.add_argument("--dataroot", default="./data/")
-    parser.add_argument("--nepochs", default=30, type=int)  # 기존
-    # parser.add_argument("--nepochs", default=60, type=int)  # vit용
+    parser.add_argument("--nepochs", default=30, type=int)
     parser.add_argument("--gpuid", default=0, type=int)
     parser.add_argument("--logdir", default="./logs/pretrain/model_weights/", help="path for the log file")
     parser.add_argument("--bsize", default=7, type=int)
@@ -185,10 +143,29 @@ def parse_args():
     parser.add_argument("--ncams", default=6, type=int)
 
     args = parser.parse_args()
-
     return args
 
 
 if __name__ == "__main__":
     args = parse_args()
-    train(args)
+
+    max_grad_norm = 5.0
+    grid_conf = {
+        "xbound": args.xbound,
+        "ybound": args.ybound,
+        "zbound": args.zbound,
+        "dbound": args.dbound,
+    }
+    data_aug_conf = {
+        "resize_lim": args.resize_lim,
+        "final_dim": args.final_dim,
+        "rot_lim": args.rot_lim,
+        "H": args.H,
+        "W": args.W,
+        "rand_flip": args.rand_flip,
+        "bot_pct_lim": args.bot_pct_lim,
+        "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
+        "Ncams": args.ncams,
+    }
+
+    pretrain(args, grid_conf, data_aug_conf, max_grad_norm)

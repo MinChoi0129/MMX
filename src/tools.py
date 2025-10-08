@@ -78,35 +78,6 @@ def get_lidar_data(nusc, sample_rec, nsweeps, min_distance):
     return points
 
 
-def ego_to_cam(points, rot, trans, intrins):
-    """Transform points (3 x N) from ego frame into a pinhole camera"""
-    points = points - trans.unsqueeze(1)
-    points = rot.permute(1, 0).matmul(points)
-
-    points = intrins.matmul(points)
-    points[:2] /= points[2:3]
-
-    return points
-
-
-def cam_to_ego(points, rot, trans, intrins):
-    """Transform points (3 x N) from pinhole camera with depth
-    to the ego frame
-    """
-    points = torch.cat((points[:2] * points[2:3], points[2:3]))
-    points = intrins.inverse().matmul(points)
-
-    points = rot.matmul(points)
-    points += trans.unsqueeze(1)
-
-    return points
-
-
-def get_only_in_img_mask(pts, H, W):
-    """pts should be 3 x N"""
-    return (pts[2] > 0) & (pts[0] > 1) & (pts[0] < W - 1) & (pts[1] > 1) & (pts[1] < H - 1)
-
-
 def get_rot(h):
     return torch.Tensor(
         [
@@ -174,8 +145,6 @@ def gen_dx_bx(xbound, ybound, zbound):
     dx = torch.Tensor([row[2] for row in [xbound, ybound, zbound]])
     bx = torch.Tensor([row[0] + row[2] / 2.0 for row in [xbound, ybound, zbound]])
     nx = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]])
-
-    # print(dx, bx, nx)
     return dx, bx, nx
 
 
@@ -250,29 +219,13 @@ def MultiLoss(bev_pre, act_pre, desc_pre, bev_gt, act_gt, desc_gt, args):
     loss_desc = F.binary_cross_entropy_with_logits(desc_pre, desc_gt, weight=w2)
 
     loss_all = loss_bev + loss_act + loss_desc
-    return loss_all
-
-
-def MultiLoss_nobev(act_pre, desc_pre, bev_gt, act_gt, desc_gt, args):
-
-    act_pre = act_pre.cuda(args.gpuid)
-    desc_pre = desc_pre.cuda(args.gpuid)
-    act_weights = [20, 250, 250, 250]  # for act
-    desc_weights = [20, 400, 400, 400, 20, 20, 20, 20]  # for desc
-    w1 = torch.FloatTensor(act_weights).cuda(args.gpuid)
-    w2 = torch.FloatTensor(desc_weights).cuda(args.gpuid)
-    loss_act = F.binary_cross_entropy_with_logits(act_pre, act_gt, weight=w1)
-    loss_desc = F.binary_cross_entropy_with_logits(desc_pre, desc_gt, weight=w2)
-
-    loss_all = loss_act + loss_desc
-    return loss_all
+    return loss_all, loss_bev, loss_act, loss_desc
 
 
 def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
     model.eval()
     confmat = ConfusionMatrix(4)
     total_loss = 0.0
-    print("running eval...")
     loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
         for batch in loader:
@@ -286,7 +239,7 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
                 post_trans.to(device),
             )
             # binimgs = binimgs.to(device)
-            binimgs = binimgs.to(device)[:, -1, :, :]
+            binimgs = binimgs.to(device)[:, -1, :, :]  # select newest frame
 
             total_loss += loss_fn(preds, binimgs).item() * preds.shape[0]
             confmat.update(binimgs.flatten(), preds.argmax(1).flatten())
@@ -309,7 +262,6 @@ def visualize_bev_gt(bev_gt: torch.Tensor):
 def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_num=8):
     model.eval()
     confmat = ConfusionMatrix(4)
-    print("running eval...")
     loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
         targets_acts = []
@@ -349,7 +301,10 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
                     post_rots.to(device),
                     post_trans.to(device),
                 )
-            binimgs = binimgs.to(device)
+            binimgs = binimgs.to(device)[:, -1, :, :]
+            acts_gt = acts_gt.to(device)[:, -1, :]
+            descs_gt = descs_gt.to(device)[:, -1, :]
+
             bev_pres = bev_pres.to(device)
             act_pres = act_pres.to(device)
             desc_pres = desc_pres.to(device)
@@ -373,7 +328,6 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
         output_desc = List2List(output_desc)
         targets_acts = List2List(targets_acts)
         output_acts = List2List(output_acts)
-        # print(output_acts)
 
         for i in range(act_num):
             act_category[i] = f1_score(targets_acts[i::act_num], output_acts[i::act_num])
@@ -385,8 +339,6 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
 
         # 추론 시간 통계 계산 및 출력
         if inference_times:
-            import numpy as np
-
             times_array = np.array(inference_times)
             mean_time = np.mean(times_array) * 1000
             std_time = np.std(times_array) * 1000
@@ -408,201 +360,12 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
     )
 
 
-def get_val_info_nobev(model, valloader, device, use_tqdm=True, act_num=4, desc_num=8):
-    model.eval()
-    print("running eval...")
-    loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
-    with torch.no_grad():
-        targets_acts = []
-        targets_desc = []
-        output_acts = []
-        output_desc = []
-        act_category = [0.0] * 4
-        desc_category = [0.0] * 8
-
-        for batch in loader:
-            allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts_gt, descs_gt = batch
-            act_pres, desc_pres = model(
-                allimgs.to(device),
-                rots.to(device),
-                trans.to(device),
-                intrins.to(device),
-                post_rots.to(device),
-                post_trans.to(device),
-            )
-            binimgs = binimgs.to(device)
-            act_pres = act_pres.to(device)
-            desc_pres = desc_pres.to(device)
-            predict_act = torch.sigmoid(act_pres) > 0.5
-            predict_desc = torch.sigmoid(desc_pres) > 0.5
-            predict_act = predict_act.cpu().numpy()
-            predict_desc = predict_desc.cpu().numpy()
-            acts_gt_numpy = acts_gt.cpu().numpy()
-            descs_gt_numpy = descs_gt.cpu().numpy()
-
-            targets_acts.append(acts_gt_numpy)
-            output_acts.append(predict_act)
-            targets_desc.append(descs_gt_numpy)
-            output_desc.append(predict_desc)
-
-            # confmat.update(binimgs.flatten(), bev_pres.argmax(1).flatten())
-
-        # confmat.reduce_from_all_processes()
-
-        targets_desc = List2List(targets_desc)
-        output_desc = List2List(output_desc)
-        targets_acts = List2List(targets_acts)
-        output_acts = List2List(output_acts)
-
-        for i in range(act_num):
-            act_category[i] = f1_score(targets_acts[i::act_num], output_acts[i::act_num])
-
-        for i in range(desc_num):
-            desc_category[i] = f1_score(targets_desc[i::desc_num], output_desc[i::desc_num])
-        f1_overall_act = f1_score(targets_acts, output_acts, average="macro")
-        f1_overall_desc = f1_score(targets_desc, output_desc, average="macro")
-
-    model.train()
-    return act_category, desc_category, f1_overall_act, f1_overall_desc, np.mean(act_category), np.mean(desc_category)
-
-
 def List2List(List):
     Arr1 = np.array(List[:-1]).reshape(-1, List[0].shape[1])
     Arr2 = np.array(List[-1]).reshape(-1, List[0].shape[1])
     Arr = np.vstack((Arr1, Arr2))
 
     return [i for item in Arr for i in item]
-
-
-def add_ego(bx, dx):
-    # approximate rear axel
-    W = 1.85
-    pts = np.array(
-        [
-            [-4.084 / 2.0 + 0.5, W / 2.0],
-            [4.084 / 2.0 + 0.5, W / 2.0],
-            [4.084 / 2.0 + 0.5, -W / 2.0],
-            [-4.084 / 2.0 + 0.5, -W / 2.0],
-        ]
-    )
-    pts = (pts - bx) / dx
-    pts[:, [0, 1]] = pts[:, [1, 0]]
-    plt.fill(pts[:, 0], pts[:, 1], "#76b900")
-
-
-def get_nusc_maps(map_folder):
-    nusc_maps = {
-        map_name: NuScenesMap(dataroot=map_folder, map_name=map_name)
-        for map_name in [
-            "singapore-hollandvillage",
-            "singapore-queenstown",
-            "boston-seaport",
-            "singapore-onenorth",
-        ]
-    }
-    return nusc_maps
-
-
-def plot_nusc_map(rec, nusc_maps, nusc, scene2map, dx, bx):
-    egopose = nusc.get("ego_pose", nusc.get("sample_data", rec["data"]["LIDAR_TOP"])["ego_pose_token"])
-    map_name = scene2map[nusc.get("scene", rec["scene_token"])["name"]]
-
-    rot = Quaternion(egopose["rotation"]).rotation_matrix
-    rot = np.arctan2(rot[1, 0], rot[0, 0])
-    center = np.array([egopose["translation"][0], egopose["translation"][1], np.cos(rot), np.sin(rot)])
-
-    poly_names = ["road_segment", "lane"]
-    line_names = ["road_divider", "lane_divider"]
-    lmap = get_local_map(nusc_maps[map_name], center, 50.0, poly_names, line_names)
-    for name in poly_names:
-        for la in lmap[name]:
-            pts = (la - bx) / dx
-            plt.fill(pts[:, 1], pts[:, 0], c=(1.00, 0.50, 0.31), alpha=0.2)
-    for la in lmap["road_divider"]:
-        pts = (la - bx) / dx
-        plt.plot(pts[:, 1], pts[:, 0], c=(0.0, 0.0, 1.0), alpha=0.5)
-    for la in lmap["lane_divider"]:
-        pts = (la - bx) / dx
-        plt.plot(pts[:, 1], pts[:, 0], c=(159.0 / 255.0, 0.0, 1.0), alpha=0.5)
-
-
-def save_nusc_map(rec, nusc_maps, nusc, scene2map, dx, bx):
-    egopose = nusc.get("ego_pose", nusc.get("sample_data", rec["data"]["LIDAR_TOP"])["ego_pose_token"])
-    map_name = scene2map[nusc.get("scene", rec["scene_token"])["name"]]
-
-    rot = Quaternion(egopose["rotation"]).rotation_matrix
-    rot = np.arctan2(rot[1, 0], rot[0, 0])
-    center = np.array([egopose["translation"][0], egopose["translation"][1], np.cos(rot), np.sin(rot)])
-
-    poly_names = ["road_segment", "lane"]
-    line_names = ["road_divider", "lane_divider"]
-    lmap = get_local_map(nusc_maps[map_name], center, 50.0, poly_names, line_names)
-    backg = np.zeros((200, 200))
-    # backg = np.zeros((300, 300)) # for polar
-
-    for name in poly_names:
-        for la in lmap[name]:
-            pts = np.round((la - bx) / dx).astype(np.int32)
-            cv2.fillPoly(backg, [pts], 2)
-    for la in lmap["road_divider"]:
-        pts = np.round((la - bx) / dx).astype(np.int32)
-        cv2.fillPoly(backg, [pts], 3)
-    for la in lmap["lane_divider"]:
-        pts = np.round((la - bx) / dx).astype(np.int32)
-        cv2.fillPoly(backg, [pts], 3)
-
-    return backg.astype(int)
-    # cv2.imshow("Image", backg)
-    # cv2.waitKey(0)
-
-
-def get_local_map(nmap, center, stretch, layer_names, line_names):
-    # need to get the map here...
-    box_coords = (
-        center[0] - stretch,
-        center[1] - stretch,
-        center[0] + stretch,
-        center[1] + stretch,
-    )
-
-    polys = {}
-
-    # polygons
-    records_in_patch = nmap.get_records_in_patch(box_coords, layer_names=layer_names, mode="intersect")
-    for layer_name in layer_names:
-        polys[layer_name] = []
-        for token in records_in_patch[layer_name]:
-            poly_record = nmap.get(layer_name, token)
-            if layer_name == "drivable_area":
-                polygon_tokens = poly_record["polygon_tokens"]
-            else:
-                polygon_tokens = [poly_record["polygon_token"]]
-
-            for polygon_token in polygon_tokens:
-                polygon = nmap.extract_polygon(polygon_token)
-                polys[layer_name].append(np.array(polygon.exterior.xy).T)
-
-    # lines
-    for layer_name in line_names:
-        polys[layer_name] = []
-        for record in getattr(nmap, layer_name):
-            token = record["token"]
-
-            line = nmap.extract_line(record["line_token"])
-            if line.is_empty:  # Skip lines without nodes
-                continue
-            xs, ys = line.xy
-
-            polys[layer_name].append(np.array([xs, ys]).T)
-
-    # convert to local coordinates in place
-    rot = get_rot(np.arctan2(center[3], center[2])).T
-    for layer_name in polys:
-        for rowi in range(len(polys[layer_name])):
-            polys[layer_name][rowi] -= center[:2]
-            polys[layer_name][rowi] = np.dot(polys[layer_name][rowi], rot)
-
-    return polys
 
 
 class ConfusionMatrix(object):

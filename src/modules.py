@@ -1,11 +1,50 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-import timm
-
 from efficientnet_pytorch import EfficientNet
 from torchvision.models.resnet import resnet18
-from src.pretty_print import shprint
+
+
+class TemporalConcat1x1(nn.Module):
+    """
+    간단한 시간 융합기: [cur, prev] 채널 concat → 1x1 Conv → BN → ReLU.
+    prev가 None이면 cur 그대로 반환.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.fuse = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, cur: torch.Tensor, prev: torch.Tensor | None):
+        if prev is None:
+            return cur
+        return self.fuse(torch.cat([cur, prev], dim=1))
+
+
+class TemporalEMA(nn.Module):
+    """
+    EMA 융합기: fused = a*cur + (1-a)*prev. a는 (0,1)로 squash된 학습 파라미터.
+    prev가 None이면 cur 그대로 반환.
+    """
+
+    def __init__(self, init_alpha: float = 0.7):
+        super().__init__()
+        # unconstrained scalar → sigmoid로 (0,1)
+        self._alpha = nn.Parameter(torch.tensor(float(init_alpha)).logit())
+
+    @property
+    def alpha(self):
+        return torch.sigmoid(self._alpha)
+
+    def forward(self, cur: torch.Tensor, prev: torch.Tensor | None):
+        if prev is None:
+            return cur
+        a = self.alpha.view(1, 1, 1, 1).to(cur.dtype).to(cur.device)
+        return a * cur + (1.0 - a) * prev
 
 
 class Up(nn.Module):
@@ -29,126 +68,13 @@ class Up(nn.Module):
         return self.conv(x1)
 
 
-def _resize_pos_embed_custom(pos_embed: torch.Tensor, new_hw: tuple, num_prefix_tokens: int = 1):
-    # pos_embed: [1, T, C],   T = P + gh*gw
-    # 반환:     [1, P + H*W, C]
-    P = num_prefix_tokens
-    prefix = pos_embed[:, :P] if P > 0 else pos_embed[:, :0]
-    grid = pos_embed[:, P:] if P > 0 else pos_embed
-
-    # 원래 grid 크기 추정(정사각형 가정)
-    ghw = grid.shape[1]
-    gh = int(ghw**0.5)
-    gw = ghw // gh
-
-    grid = grid.reshape(1, gh, gw, -1).permute(0, 3, 1, 2)  # [1, C, gh, gw]
-    grid = F.interpolate(grid, size=new_hw, mode="bicubic", align_corners=False)
-    grid = grid.permute(0, 2, 3, 1).reshape(1, new_hw[0] * new_hw[1], -1)  # [1, H*W, C]
-    return torch.cat([prefix, grid], dim=1)
-
-
-class EncoderViT(nn.Module):
-    """
-    Drop-in replacement for Encoder:
-      Input : [B, N, 3, 128, 352]
-      Output: [B*N, 512, 8, 22]
-    """
-
-    def __init__(self, vit_name: str = "vit_small_patch16_224"):
-        super().__init__()
-        # 1) timm ViT (pretrained, head 제거)
-        self.trunk = timm.create_model(vit_name, pretrained=True, num_classes=0)
-
-        # 2) 128x352 입력 허용
-        if hasattr(self.trunk, "patch_embed"):
-            pe = self.trunk.patch_embed
-            if hasattr(pe, "strict_img_size"):
-                pe.strict_img_size = False
-            if hasattr(pe, "img_size"):
-                pe.img_size = (128, 352)
-
-        # /16 그리드 크기 & 임베딩 차원
-        patch = self.trunk.patch_embed.patch_size[0]  # 16
-        self.H16, self.W16 = 128 // patch, 352 // patch  # 8, 22
-        self.embed_dim = self.trunk.num_features  # e.g., 768
-
-        # 3) /16, /32 정렬 → Up으로 융합 (EfficientNet Encoder와 동일한 채널/해상도로 맞춤)
-        self.proj16 = nn.Conv2d(self.embed_dim, 256, kernel_size=1, bias=False)  # /16
-        self.proj32 = nn.Conv2d(256, 256, kernel_size=1, bias=False)  # /32
-        self.up1 = Up(256 + 256, 512)  # /32 → /16 skip concat → 512ch @ 8x22
-
-    def _forward_vit_16x(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [BN, 3, 128, 352] → ViT 토큰/블록 → [BN, C(embed), 8, 22]
-        """
-        trunk = self.trunk
-        BN = x.shape[0]
-
-        # patch_embed: 보통 [BN, L, C] (L=8*22)
-        z = trunk.patch_embed(x)
-        tokens = z if z.dim() == 3 else z.flatten(2).transpose(1, 2)
-
-        # CLS 토큰
-        if getattr(trunk, "cls_token", None) is not None:
-            cls = trunk.cls_token.expand(BN, -1, -1)
-            tokens = torch.cat([cls, tokens], dim=1)
-
-        # pos_embed를 (8,22)로 보간 후 더함
-        if getattr(trunk, "pos_embed", None) is not None:
-            pe = _resize_pos_embed_custom(trunk.pos_embed, (self.H16, self.W16), num_prefix_tokens=1)
-            tokens = tokens + pe
-
-        if getattr(trunk, "pos_drop", None) is not None:
-            tokens = trunk.pos_drop(tokens)
-
-        # Transformer blocks
-        for blk in trunk.blocks:
-            tokens = blk(tokens)
-        if getattr(trunk, "norm", None) is not None:
-            tokens = trunk.norm(tokens)
-
-        # CLS 제거 후 2D 맵 복원
-        if getattr(trunk, "cls_token", None) is not None:
-            tokens = tokens[:, 1:, :]
-        C = tokens.shape[-1]
-        feat16 = tokens.transpose(1, 2).reshape(BN, C, self.H16, self.W16)  # [BN, C, 8, 22]
-        return feat16
-
-    def get_eff_depth(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        EfficientNet Encoder와 동일한 인터페이스/형상:
-          x: [B, N, 3, 128, 352] → [B*N, 512, 8, 22]
-        """
-        B, N, C, H, W = x.shape
-        x = x.view(B * N, C, H, W)  # [BN, 3, 128, 352]
-
-        f16 = self._forward_vit_16x(x)  # [BN, embed_dim, 8, 22]
-        f16 = self.proj16(f16)  # [BN, 256, 8, 22]
-        f32 = F.avg_pool2d(f16, 2, 2)  # [BN, 256, 4, 11]
-        f32 = self.proj32(f32)  # [BN, 256, 4, 11]
-
-        fused = self.up1(f32, f16)  # [BN, 512, 8, 22]
-        return fused
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.get_eff_depth(x)
-
-
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
         self.trunk = EfficientNet.from_pretrained("efficientnet-b4")
         self.up1 = Up(448 + 160, 512)
-        # 320+112 for b0/b1; 352+120 for b2; 384+136 for b3; 448+160 for b4; 512+176 for b5; 576+200 for b6, 640+224 for b7
 
-        # Concat fusion을 위한 conv 레이어
-        self.fusion_conv = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=1, bias=False),  # 512 + 512 = 1024
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-        )
-
-    def get_eff_depth(self, x, deep_feature):
+    def get_eff_depth(self, x):
         # Input: [B, N=6, C=3, H=128, W=352]
         B, N, C, imH, imW = x.shape
         x = x.view(B * N, C, imH, imW)
@@ -172,20 +98,11 @@ class Encoder(nn.Module):
         endpoints["reduction_{}".format(len(endpoints) + 1)] = x
         out = self.up1(endpoints["reduction_5"], endpoints["reduction_4"])
 
-        # Concat fusion 로직
-        if deep_feature is not None:
-            # t >= 1: 과거 피처와 현재 피처를 concat 후 conv로 융합
-            # deep_feature는 이전 시점의 최종 출력 [B*N, 512, 8, 22]
-            fused = torch.cat([out, deep_feature], dim=1)  # [B*N, 1024, 8, 22]
-            fused = self.fusion_conv(fused)  # [B*N, 512, 8, 22]
-            return out, fused  # 융합된 결과를 반환하고 다음 시점을 위해 저장
-        else:
-            # t=0: 융합 없이 현재 피처만 사용
-            return out, out  # 현재 피처를 반환하고 다음 시점을 위해 저장
+        return out
 
-    def forward(self, x, deep_feature):
-        x, deep_feature = self.get_eff_depth(x, deep_feature)  # [B*D, 512, H=8, W=22]
-        return x, deep_feature
+    def forward(self, x):
+        x = self.get_eff_depth(x)  # [B*D, 512, H=8, W=22]
+        return x
 
 
 class CamEncode(nn.Module):

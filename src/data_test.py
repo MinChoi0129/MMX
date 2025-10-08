@@ -28,8 +28,6 @@ class NuscData(torch.utils.data.Dataset):
 
         self.fix_nuscenes_formatting()
 
-        print(self)
-
     def fix_nuscenes_formatting(self):
         """If nuscenes is stored with trainval/1 trainval/2 ... structure, adjust the file paths
         stored in the nuScenes object.
@@ -244,81 +242,118 @@ class NuscData(torch.utils.data.Dataset):
         return len(self.ixes)
 
 
-class VizData(NuscData):
-    def __init__(self, *args, **kwargs):
-        super(VizData, self).__init__(*args, **kwargs)
-
-    def __getitem__(self, index):
-        rec = self.ixes[index]
-        dataroot = self.dataroot
-
-        cams = self.choose_cams()
-        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-        lidar_data = self.get_lidar_data(rec, nsweeps=3)
-        binimg = self.get_binimg(rec, dataroot)
-
-        return imgs, rots, trans, intrins, post_rots, post_trans, lidar_data, binimg
-
-
 class SegmentationData(NuscData):
     def __init__(self, *args, **kwargs):
         super(SegmentationData, self).__init__(*args, **kwargs)
 
+    def _collect_prev_frames(self, rec, num_needed):
+        """
+        현재 rec(=t0)에서 시작해 prev 포인터를 따라 최대 num_needed-1개까지
+        과거 프레임을 모은 뒤, [..., t-2, t-1, t0] 순서로 반환.
+        장면 시작부라 부족하면 가장 오래된 프레임을 반복(pad)해서 길이를 맞춘다.
+        """
+        frames = [rec]  # [t0]
+        cur = rec
+        # prev 따라가며 과거 프레임 추가 (t-1, t-2, ...)
+        for _ in range(num_needed - 1):
+            prev_tok = cur.get("prev", "")
+            if not prev_tok:
+                break
+            prev_rec = self.nusc.get("sample", prev_tok)
+            # 장면 경계 넘어가면 중단
+            if prev_rec["scene_token"] != rec["scene_token"]:
+                break
+            frames.append(prev_rec)
+            cur = prev_rec
+
+        # frames = [t0, t-1, (t-2), (t-3)] 형태 → 시간 오름차순으로 뒤집어 [t-3..t0]
+        frames = frames[::-1]
+
+        # 부족하면 가장 오래된 프레임을 반복해서 앞쪽에 pad
+        if len(frames) < num_needed:
+            pad_count = num_needed - len(frames)
+            frames = [frames[0]] * pad_count + frames
+
+        # 길이를 정확히 맞춤
+        return frames[-num_needed:]
+
     def __getitem__(self, index):
-        rec = self.ixes[index]
+        """
+        반환 형태:
+          imgs:       [T, 6, 3, H, W]
+          rots:       [T, 6, 3, 3]
+          trans:      [T, 6, 3]
+          intrins:    [T, 6, 3, 3]
+          post_rots:  [T, 6, 3, 3]
+          post_trans: [T, 6, 3]
+          binimgs:    [T, nx[0], nx[1]]
+          act:        [T, 4]
+          desc:       [T, 8]
+        """
+        rec_t0 = self.ixes[index]
         dataroot = self.dataroot
-
         cams = self.choose_cams()
-        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-        binimg = self.get_binimg(rec, dataroot)
-        act, desc = self.get_txt(rec, dataroot)
 
-        return imgs, rots, trans, intrins, post_rots, post_trans, binimg, act, desc
+        # ... ~ t0 프레임 수집
+        rec_list = self._collect_prev_frames(rec_t0, num_needed=3)  # [..., t-2, t-1, t0]
+
+        imgs_seq = []
+        rots_seq = []
+        trans_seq = []
+        intrins_seq = []
+        post_rots_seq = []
+        post_trans_seq = []
+        binimgs_seq = []
+        act_seq = []
+        desc_seq = []
+
+        for r in rec_list:
+            imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(r, cams)
+            binimg = self.get_binimg(r, dataroot)
+            act, desc = self.get_txt(r, dataroot)
+
+            imgs_seq.append(imgs)  # [6, 3, H, W]
+            rots_seq.append(rots)  # [6, 3, 3]
+            trans_seq.append(trans)  # [6, 3]
+            intrins_seq.append(intrins)  # [6, 3, 3]
+            post_rots_seq.append(post_rots)  # [6, 3, 3]
+            post_trans_seq.append(post_trans)  # [6, 3]
+            binimgs_seq.append(binimg)  # [nx0, nx1]
+            act_seq.append(act)  # [4]
+            desc_seq.append(desc)  # [8]
+
+        # 시간축으로 스택: T
+        imgs_seq = torch.stack(imgs_seq, dim=0)  # [T, 6, 3, H, W]
+        rots_seq = torch.stack(rots_seq, dim=0)  # [T, 6, 3, 3]
+        trans_seq = torch.stack(trans_seq, dim=0)  # [T, 6, 3]
+        intrins_seq = torch.stack(intrins_seq, dim=0)  # [T, 6, 3, 3]
+        post_rots_seq = torch.stack(post_rots_seq, dim=0)  # [T, 6, 3, 3]
+        post_trans_seq = torch.stack(post_trans_seq, dim=0)  # [T, 6, 3]
+        binimgs_seq = torch.stack(binimgs_seq, dim=0)  # [T, nx0, nx1]
+        act_seq = torch.stack(act_seq, dim=0)  # [T, 4]
+        desc_seq = torch.stack(desc_seq, dim=0)  # [T, 8]
+
+        return (
+            imgs_seq,
+            rots_seq,
+            trans_seq,
+            intrins_seq,
+            post_rots_seq,
+            post_trans_seq,
+            binimgs_seq,
+            act_seq,
+            desc_seq,
+        )
 
 
 def worker_rnd_init(x):
     np.random.seed(13 + x)
 
 
-def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers, parser_name):
+def compile_data_test(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers):
     nusc = NuScenes(version="v1.0-{}".format(version), dataroot=os.path.join(dataroot, version), verbose=False)
-    parser = {
-        "vizdata": VizData,
-        "segmentationdata": SegmentationData,
-    }[parser_name]
-    traindata = parser(
-        nusc,
-        is_train=True,
-        data_aug_conf=data_aug_conf,
-        grid_conf=grid_conf,
-        data_root=os.path.join(dataroot, version),
-    )
-    valdata = parser(
-        nusc,
-        is_train=False,
-        data_aug_conf=data_aug_conf,
-        grid_conf=grid_conf,
-        data_root=os.path.join(dataroot, version),
-    )
 
-    trainloader = torch.utils.data.DataLoader(
-        traindata, batch_size=bsz, shuffle=True, num_workers=nworkers, drop_last=True, worker_init_fn=worker_rnd_init
-    )
-    valloader = torch.utils.data.DataLoader(
-        valdata, batch_size=bsz, shuffle=False, num_workers=nworkers, drop_last=True
-    )
-
-    return trainloader, valloader
-
-
-def compile_data_test(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers, parser_name):
-    nusc = NuScenes(version="v1.0-{}".format(version), dataroot=os.path.join(dataroot, version), verbose=False)
-    parser = {
-        "vizdata": VizData,
-        "segmentationdata": SegmentationData,
-    }[parser_name]
-
-    testdata = parser(
+    testdata = SegmentationData(
         nusc,
         is_train=False,
         data_aug_conf=data_aug_conf,

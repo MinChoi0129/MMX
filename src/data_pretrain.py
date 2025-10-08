@@ -6,9 +6,6 @@ import cv2
 from pyquaternion import Quaternion
 from nuscenes.nuscenes import NuScenes
 from src.datasplit_npre import create_splits_scenes
-
-# from nuscenes.utils.splits import create_splits_scenes # For make BEV GT
-
 from nuscenes.utils.data_classes import Box
 from glob import glob
 from .tools import get_lidar_data, img_transform, normalize_img, gen_dx_bx
@@ -29,8 +26,6 @@ class NuscData(torch.utils.data.Dataset):
         self.dx, self.bx, self.nx = dx.numpy(), bx.numpy(), nx.numpy()
 
         self.fix_nuscenes_formatting()
-
-        print(self)
 
     def fix_nuscenes_formatting(self):
         """If nuscenes is stored with trainval/1 trainval/2 ... structure, adjust the file paths
@@ -223,37 +218,9 @@ class NuscData(torch.utils.data.Dataset):
         return len(self.ixes)
 
 
-class VizData(NuscData):
-    def __init__(self, *args, **kwargs):
-        super(VizData, self).__init__(*args, **kwargs)
-
-    def __getitem__(self, index):
-        rec = self.ixes[index]
-        dataroot = self.dataroot
-
-        cams = self.choose_cams()
-        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-        lidar_data = self.get_lidar_data(rec, nsweeps=3)
-        binimg = self.get_binimg(rec, dataroot)
-        # binimg = 1  # For make BEV GT
-
-        return imgs, rots, trans, intrins, post_rots, post_trans, lidar_data, binimg
-
-
 class SegmentationData(NuscData):
     def __init__(self, *args, **kwargs):
         super(SegmentationData, self).__init__(*args, **kwargs)
-
-    # def __getitem__(self, index):
-    #     rec = self.ixes[index]
-    #     dataroot = self.dataroot
-
-    #     cams = self.choose_cams()
-    #     imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
-    #     binimg = self.get_binimg(rec, dataroot)
-    #     # binimg = 1 # For make BEV GT
-
-    #     return imgs, rots, trans, intrins, post_rots, post_trans, binimg
 
     def _collect_prev_frames(self, rec, num_needed):
         """
@@ -348,20 +315,17 @@ def worker_rnd_init(x):
     np.random.seed(13 + x)
 
 
-def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers, parser_name):
+def compile_data(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers):
     nusc = NuScenes(version="v1.0-{}".format(version), dataroot=os.path.join(dataroot, version), verbose=False)
-    parser = {
-        "vizdata": VizData,
-        "segmentationdata": SegmentationData,
-    }[parser_name]
-    traindata = parser(
+
+    traindata = SegmentationData(
         nusc,
         is_train=True,
         data_aug_conf=data_aug_conf,
         grid_conf=grid_conf,
         data_root=os.path.join(dataroot, version),
     )
-    valdata = parser(
+    valdata = SegmentationData(
         nusc,
         is_train=False,
         data_aug_conf=data_aug_conf,

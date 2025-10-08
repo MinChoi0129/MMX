@@ -1,81 +1,23 @@
-import torch
 import matplotlib as mpl
 
 mpl.use("Agg")
 
-from src.data_pretrain import compile_data
+import torch
+
+torch.set_float32_matmul_precision("high")
+
+import os
 from src.data_test import compile_data_test
-from src.tools import SimpleLoss, get_val_info, gen_dx_bx, get_val_info_new, get_val_info_nobev
-from src.model_BEV_TXT import compile_model_lss, compile_model_bevtxt
+from src.tools import get_val_info_new
+from src.model_BEV_TXT import compile_model_bevtxt
 
 
-def iou_predict(args):
-    grid_conf = {
-        "xbound": args.xbound,
-        "ybound": args.ybound,
-        "zbound": args.zbound,
-        "dbound": args.dbound,
-    }
-    data_aug_conf = {
-        "resize_lim": args.resize_lim,
-        "final_dim": args.final_dim,
-        "rot_lim": args.rot_lim,
-        "H": args.H,
-        "W": args.W,
-        "rand_flip": args.rand_flip,
-        "bot_pct_lim": args.bot_pct_lim,
-        "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
-        "Ncams": args.ncams,
-    }
-    trainloader, valloader = compile_data(
-        args.version,
-        args.dataroot,
-        data_aug_conf=data_aug_conf,
-        grid_conf=grid_conf,
-        bsz=args.bsize,
-        nworkers=args.nworkers,
-        parser_name="segmentationdata",
-    )
+def bev_txt_pred(args, grid_conf, data_aug_conf):
+    print("[Info] Ready for testing...")
+    device = torch.device("cuda:0")
+    print("[Info] Device: {}".format(device))
 
-    device = torch.device("cpu") if args.gpuid < 0 else torch.device(f"cuda:{args.gpuid}")
-
-    model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
-    print("loading", args.checkpoint)
-    model.load_state_dict(torch.load(args.checkpoint), strict=True)
-    model.to(device)
-    loss_fn = SimpleLoss().cuda(args.gpuid)
-
-    model.eval()
-    iou_info, val_loss = get_val_info(model, valloader, loss_fn, device)
-    iou_info = str(iou_info)
-    print(iou_info)
-    print("val_loss: {}".format(val_loss))
-
-    # Log the val info
-    results_txt = "./b1_20.txt"
-    with open(results_txt, "a") as f:
-        f.write("checkpoint:{}".format(args.checkpoint) + iou_info + "\n" + "val_loss: " + str(val_loss) + "\n\n")
-
-
-def bev_txt_pred(args):
-
-    grid_conf = {
-        "xbound": args.xbound,
-        "ybound": args.ybound,
-        "zbound": args.zbound,
-        "dbound": args.dbound,
-    }
-    data_aug_conf = {
-        "resize_lim": args.resize_lim,
-        "final_dim": args.final_dim,
-        "rot_lim": args.rot_lim,
-        "H": args.H,
-        "W": args.W,
-        "rand_flip": args.rand_flip,
-        "bot_pct_lim": args.bot_pct_lim,
-        "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
-        "Ncams": args.ncams,
-    }
+    print("[Info] Compiling data...")
     testloader = compile_data_test(
         args.version,
         args.dataroot,
@@ -83,23 +25,28 @@ def bev_txt_pred(args):
         grid_conf=grid_conf,
         bsz=args.bsize,
         nworkers=args.nworkers,
-        parser_name="segmentationdata",
     )
 
-    device = torch.device(f"cuda:{args.gpuid}")
-
+    print("[Info] Compiling model...")
     model = compile_model_bevtxt(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     if args.checkpoint:
-        print("loading", args.checkpoint)
-        model.load_state_dict(torch.load(args.checkpoint, map_location=f"cuda:{args.gpuid}"), strict=True)
+        model.load_state_dict(torch.load(args.checkpoint, map_location=f"cuda:0"), strict=True)
+        print("[Info] Loaded checkpoint from {}".format(args.checkpoint))
     model.to(device)
-
     model.eval()
-    iou_info, category_act, category_desc, act_overall, desc_overall, act_mean, desc_mean = get_val_info_new(
-        model, testloader, device
-    )
+
+    print("[Info] Running test...")
+    (
+        iou_info,
+        category_act,
+        category_desc,
+        act_overall,
+        desc_overall,
+        act_mean,
+        desc_mean,
+    ) = get_val_info_new(model, testloader, device)
     iou_info = str(iou_info)
-    print(iou_info)
+
     AD_info = ""
     AD_info += "F1_Action: {}\n".format(["{:.3f}".format(x) for x in category_act])
     AD_info += "F1_Description: {}\n".format(["{:.3f}".format(x) for x in category_desc])
@@ -107,12 +54,24 @@ def bev_txt_pred(args):
     AD_info += "F1_Description_Overall: {:.3f}\n".format(desc_overall)
     AD_info += "F1_Action_Mean: {:.3f}\n".format(act_mean)
     AD_info += "F1_Description_Mean: {:.3f}\n".format(desc_mean)
-    print(AD_info)
+    print(iou_info, AD_info, sep="\n")
 
-    # Log the val info
-    results_txt = "./logs/test/test_log.txt"
+    # Saving
+    print("[Info] Saving the test info...")
+    txt_filename = "test_log.txt"
+    results_path = "./logs/test/"
+    results_txt = os.path.join(results_path, txt_filename)
+
+    if not os.path.exists(results_path):
+        os.makedirs(results_path, exist_ok=True)
+
     with open(results_txt, "a") as f:
-        f.write(args.checkpoint + "\n" + iou_info + "\n" + AD_info + "-" * 100 + "\n")
+        write_str = ""
+        write_str += f"{args.checkpoint}\n"
+        write_str += f"{iou_info}\n"
+        write_str += f"{AD_info}\n"
+        write_str += "-" * 100 + "\n"
+        f.write(write_str)
 
 
 def parse_args():
@@ -125,7 +84,7 @@ def parse_args():
     parser.add_argument("--gpuid", default=0, type=int)
     parser.add_argument("--bsize", default=1, type=int)
     parser.add_argument("--nworkers", default=10, type=int)
-    parser.add_argument("--checkpoint", default="/path/to/the/weight/")
+    parser.add_argument("--checkpoint", default="./logs/train/model_weights/best_model.pt")
     parser.add_argument("--seg_classes", default=4, help="number of class in segmentation")
 
     parser.add_argument("--xbound", default=[-50.0, 50.0, 0.5], help="grid configuration")
@@ -142,11 +101,29 @@ def parse_args():
     parser.add_argument("--ncams", default=6, type=int)
 
     args = parser.parse_args()
-
     return args
 
 
 if __name__ == "__main__":
     args = parse_args()
-    # iou_predict(args)
-    bev_txt_pred(args)
+
+    grid_conf = {
+        "xbound": args.xbound,
+        "ybound": args.ybound,
+        "zbound": args.zbound,
+        "dbound": args.dbound,
+    }
+
+    data_aug_conf = {
+        "resize_lim": args.resize_lim,
+        "final_dim": args.final_dim,
+        "rot_lim": args.rot_lim,
+        "H": args.H,
+        "W": args.W,
+        "rand_flip": args.rand_flip,
+        "bot_pct_lim": args.bot_pct_lim,
+        "cams": ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"],
+        "Ncams": args.ncams,
+    }
+
+    bev_txt_pred(args, grid_conf, data_aug_conf)
