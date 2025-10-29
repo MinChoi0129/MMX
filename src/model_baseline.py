@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
-from .modules import Encoder, CamEncode, BevEncode, TemporalConcat1x1
+from .modules import Encoder, CamEncode, BevEncode
+from .pretty_print import shprint
 
 
 class LSS(nn.Module):
@@ -25,16 +26,10 @@ class LSS(nn.Module):
         self.D, _, _, _ = self.frustum.shape
 
         self.encoder = Encoder()
-
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
         self.use_quickcumsum = True
-
-        # 시계열 융합기: BEV voxel feature용
-        self.Z = int(self.nx[2].item())
-        self.voxelC = self.camC * self.Z
-        self.fuse_bev = TemporalConcat1x1(self.voxelC)
 
     def create_frustum(self):
         # make grid in image plane
@@ -136,41 +131,13 @@ class LSS(nn.Module):
         x = self.voxel_pooling(geom, x)
         return x
 
-    def stage_forward(
-        self,
-        x_single,
-        rots_single,
-        trans_single,
-        intrins_single,
-        post_rots_single,
-        post_trans_single,
-        prev_bev=None,
-    ):
-        img_feats = self.encoder(x_single)
-        cur_bev = self.get_voxels(
-            img_feats, rots_single, trans_single, intrins_single, post_rots_single, post_trans_single
-        )
-        fused_bev = self.fuse_bev(cur_bev, prev_bev)  # deep feature 융합
-        return fused_bev  # 다음 step의 prev로 사용
-
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        T = x.shape[1]  # time size
-
-        prev_bev = None
-        for t in range(T):
-            prev_bev = self.stage_forward(
-                x[:, t].contiguous(),
-                rots[:, t].contiguous(),
-                trans[:, t].contiguous(),
-                intrins[:, t].contiguous(),
-                post_rots[:, t].contiguous(),
-                post_trans[:, t].contiguous(),
-                prev_bev,
-            )
-        # 마지막(융합된) BEV를 segmentation head로
-        out = self.bevencode(prev_bev)  # [B, outC, 200, 200]
-        return out
+        x = self.encoder(x)
+        x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
+        x = self.bevencode(x)
+        return x
 
 
 def compile_model_lss(bsize, grid_conf, data_aug_conf, outC):
+    # return LSS(bsize, grid_conf, data_aug_conf, outC)
     return torch.compile(LSS(bsize, grid_conf, data_aug_conf, outC))

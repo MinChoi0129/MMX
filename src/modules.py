@@ -5,48 +5,6 @@ from efficientnet_pytorch import EfficientNet
 from torchvision.models.resnet import resnet18
 
 
-class TemporalConcat1x1(nn.Module):
-    """
-    간단한 시간 융합기: [cur, prev] 채널 concat → 1x1 Conv → BN → ReLU.
-    prev가 None이면 cur 그대로 반환.
-    """
-
-    def __init__(self, channels: int):
-        super().__init__()
-        self.fuse = nn.Sequential(
-            nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, cur: torch.Tensor, prev: torch.Tensor | None):
-        if prev is None:
-            return cur
-        return self.fuse(torch.cat([cur, prev], dim=1))
-
-
-class TemporalEMA(nn.Module):
-    """
-    EMA 융합기: fused = a*cur + (1-a)*prev. a는 (0,1)로 squash된 학습 파라미터.
-    prev가 None이면 cur 그대로 반환.
-    """
-
-    def __init__(self, init_alpha: float = 0.7):
-        super().__init__()
-        # unconstrained scalar → sigmoid로 (0,1)
-        self._alpha = nn.Parameter(torch.tensor(float(init_alpha)).logit())
-
-    @property
-    def alpha(self):
-        return torch.sigmoid(self._alpha)
-
-    def forward(self, cur: torch.Tensor, prev: torch.Tensor | None):
-        if prev is None:
-            return cur
-        a = self.alpha.view(1, 1, 1, 1).to(cur.dtype).to(cur.device)
-        return a * cur + (1.0 - a) * prev
-
-
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels, scale_factor=2):
         super().__init__()
@@ -210,9 +168,7 @@ class ASPPPooling(nn.Sequential):
 class ASPP(nn.Module):
     def __init__(self, in_channels, atrous_rates, out_channels=256) -> None:
         super(ASPP, self).__init__()
-        modules = [
-            nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU())
-        ]
+        modules = [nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU())]
 
         rates = tuple(atrous_rates)
         for rate in rates:

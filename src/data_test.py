@@ -59,9 +59,7 @@ class NuscData(torch.utils.data.Dataset):
                 di, fi, fname = find_name(f)
                 info[f"sweeps/{di}/{fi}"] = fname
             for rec in self.nusc.sample_data:
-                if rec["channel"] == "LIDAR_TOP" or (
-                    rec["is_key_frame"] and rec["channel"] in self.data_aug_conf["cams"]
-                ):
+                if rec["channel"] == "LIDAR_TOP" or (rec["is_key_frame"] and rec["channel"] in self.data_aug_conf["cams"]):
                     rec["filename"] = info[rec["filename"]]
 
     def get_scenes(self):
@@ -69,7 +67,9 @@ class NuscData(torch.utils.data.Dataset):
         split = {
             "v1.0-trainval": {True: "train", False: "test"},
             "v1.0-mini": {True: "mini_train", False: "mini_val"},
-        }[self.nusc.version][self.is_train]
+        }[
+            self.nusc.version
+        ][self.is_train]
 
         scenes = create_splits_scenes()[split]
 
@@ -220,16 +220,9 @@ class NuscData(torch.utils.data.Dataset):
         with open(desc_path) as jfile:
             desc = json.load(jfile)
         desc_tensor = torch.FloatTensor(desc)
-        # print(action_tensor)
-        # print(desc_tensor)
         return action_tensor, desc_tensor
 
     def choose_cams(self):
-        # if self.is_train and self.data_aug_conf['Ncams'] < len(self.data_aug_conf['cams']):
-        #     cams = np.random.choice(self.data_aug_conf['cams'], self.data_aug_conf['Ncams'],
-        #                             replace=False)
-        # else:
-        #     cams = self.data_aug_conf['cams']
         assert self.data_aug_conf["Ncams"] == 6
         cams = self.data_aug_conf["cams"]
         return cams
@@ -246,104 +239,16 @@ class SegmentationData(NuscData):
     def __init__(self, *args, **kwargs):
         super(SegmentationData, self).__init__(*args, **kwargs)
 
-    def _collect_prev_frames(self, rec, num_needed):
-        """
-        현재 rec(=t0)에서 시작해 prev 포인터를 따라 최대 num_needed-1개까지
-        과거 프레임을 모은 뒤, [..., t-2, t-1, t0] 순서로 반환.
-        장면 시작부라 부족하면 가장 오래된 프레임을 반복(pad)해서 길이를 맞춘다.
-        """
-        frames = [rec]  # [t0]
-        cur = rec
-        # prev 따라가며 과거 프레임 추가 (t-1, t-2, ...)
-        for _ in range(num_needed - 1):
-            prev_tok = cur.get("prev", "")
-            if not prev_tok:
-                break
-            prev_rec = self.nusc.get("sample", prev_tok)
-            # 장면 경계 넘어가면 중단
-            if prev_rec["scene_token"] != rec["scene_token"]:
-                break
-            frames.append(prev_rec)
-            cur = prev_rec
-
-        # frames = [t0, t-1, (t-2), (t-3)] 형태 → 시간 오름차순으로 뒤집어 [t-3..t0]
-        frames = frames[::-1]
-
-        # 부족하면 가장 오래된 프레임을 반복해서 앞쪽에 pad
-        if len(frames) < num_needed:
-            pad_count = num_needed - len(frames)
-            frames = [frames[0]] * pad_count + frames
-
-        # 길이를 정확히 맞춤
-        return frames[-num_needed:]
-
     def __getitem__(self, index):
-        """
-        반환 형태:
-          imgs:       [T, 6, 3, H, W]
-          rots:       [T, 6, 3, 3]
-          trans:      [T, 6, 3]
-          intrins:    [T, 6, 3, 3]
-          post_rots:  [T, 6, 3, 3]
-          post_trans: [T, 6, 3]
-          binimgs:    [T, nx[0], nx[1]]
-          act:        [T, 4]
-          desc:       [T, 8]
-        """
-        rec_t0 = self.ixes[index]
+        rec = self.ixes[index]
         dataroot = self.dataroot
+
         cams = self.choose_cams()
+        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
+        binimg = self.get_binimg(rec, dataroot)
+        act, desc = self.get_txt(rec, dataroot)
 
-        # ... ~ t0 프레임 수집
-        rec_list = self._collect_prev_frames(rec_t0, num_needed=3)  # [..., t-2, t-1, t0]
-
-        imgs_seq = []
-        rots_seq = []
-        trans_seq = []
-        intrins_seq = []
-        post_rots_seq = []
-        post_trans_seq = []
-        binimgs_seq = []
-        act_seq = []
-        desc_seq = []
-
-        for r in rec_list:
-            imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(r, cams)
-            binimg = self.get_binimg(r, dataroot)
-            act, desc = self.get_txt(r, dataroot)
-
-            imgs_seq.append(imgs)  # [6, 3, H, W]
-            rots_seq.append(rots)  # [6, 3, 3]
-            trans_seq.append(trans)  # [6, 3]
-            intrins_seq.append(intrins)  # [6, 3, 3]
-            post_rots_seq.append(post_rots)  # [6, 3, 3]
-            post_trans_seq.append(post_trans)  # [6, 3]
-            binimgs_seq.append(binimg)  # [nx0, nx1]
-            act_seq.append(act)  # [4]
-            desc_seq.append(desc)  # [8]
-
-        # 시간축으로 스택: T
-        imgs_seq = torch.stack(imgs_seq, dim=0)  # [T, 6, 3, H, W]
-        rots_seq = torch.stack(rots_seq, dim=0)  # [T, 6, 3, 3]
-        trans_seq = torch.stack(trans_seq, dim=0)  # [T, 6, 3]
-        intrins_seq = torch.stack(intrins_seq, dim=0)  # [T, 6, 3, 3]
-        post_rots_seq = torch.stack(post_rots_seq, dim=0)  # [T, 6, 3, 3]
-        post_trans_seq = torch.stack(post_trans_seq, dim=0)  # [T, 6, 3]
-        binimgs_seq = torch.stack(binimgs_seq, dim=0)  # [T, nx0, nx1]
-        act_seq = torch.stack(act_seq, dim=0)  # [T, 4]
-        desc_seq = torch.stack(desc_seq, dim=0)  # [T, 8]
-
-        return (
-            imgs_seq,
-            rots_seq,
-            trans_seq,
-            intrins_seq,
-            post_rots_seq,
-            post_trans_seq,
-            binimgs_seq,
-            act_seq,
-            desc_seq,
-        )
+        return imgs, rots, trans, intrins, post_rots, post_trans, binimg, act, desc
 
 
 def worker_rnd_init(x):
@@ -361,8 +266,6 @@ def compile_data_test(version, dataroot, data_aug_conf, grid_conf, bsz, nworkers
         data_root=os.path.join(dataroot, version),
     )
 
-    testloader = torch.utils.data.DataLoader(
-        testdata, batch_size=bsz, shuffle=False, num_workers=nworkers, drop_last=True
-    )
+    testloader = torch.utils.data.DataLoader(testdata, batch_size=bsz, shuffle=False, num_workers=nworkers, drop_last=True)
 
     return testloader

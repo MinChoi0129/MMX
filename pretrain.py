@@ -1,4 +1,5 @@
 import torch
+from torch.optim.lr_scheduler import StepLR
 
 torch.set_float32_matmul_precision("high")
 import numpy as np
@@ -31,12 +32,13 @@ def pretrain(args, grid_conf, data_aug_conf, max_grad_norm):
         nworkers=args.nworkers,
     )
 
-    print("[Info] Preparing model, optimizer, and loss function...")
+    print("[Info] Preparing model, optimizer, scheduler, and loss function...")
     model = compile_model_lss(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     for param in model.encoder.parameters():
         param.requires_grad = True
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
+    scheduler = StepLR(opt, step_size=5, gamma=0.1)
     loss_fn = SimpleLoss().to(device)
 
     best_iou = 0.0
@@ -63,7 +65,7 @@ def pretrain(args, grid_conf, data_aug_conf, max_grad_norm):
                 post_trans.to(device),
             )
 
-            binimgs = binimgs.to(device)[:, -1, :, :]
+            binimgs = binimgs.to(device)[:, :, :]
             loss = loss_fn(preds, binimgs)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -108,6 +110,7 @@ def pretrain(args, grid_conf, data_aug_conf, max_grad_norm):
             writer.add_scalar("IoU/Best", best_iou, epoch)
 
         model.train()
+        scheduler.step(epoch)
 
     writer.close()
 
@@ -124,8 +127,8 @@ def parse_args():
     parser.add_argument("--logdir", default="./logs/pretrain/model_weights/", help="path for the log file")
     parser.add_argument("--bsize", default=7, type=int)
     parser.add_argument("--nworkers", default=8, type=int)
-    parser.add_argument("--lr", default=1e-3, type=float, help="initial learning rate")
-    parser.add_argument("--wdecay", default=1e-7, type=float, help="weight decay")
+    parser.add_argument("--lr", default=1e-4, type=float, help="initial learning rate")  # 1e-3 이었음
+    parser.add_argument("--wdecay", default=1e-4, type=float, help="weight decay")  # 1e-7 이었음
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--seg_classes", default=4, help="number of class in segmentation")
 

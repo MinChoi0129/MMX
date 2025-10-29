@@ -12,7 +12,6 @@ from .modules import (
     Embedder_f1,
     Embedder_f2,
     Predictor,
-    TemporalConcat1x1,
 )
 
 
@@ -53,12 +52,6 @@ class BEV_TXT(nn.Module):
         self.bevpost = BevPost()
 
         self.use_quickcumsum = True
-
-        # === Temporal fusion heads (캐시 기반) ===
-        self.Z = int(self.nx[2].item())
-        self.voxelC = self.camC * self.Z
-        self.fuse_bev = TemporalConcat1x1(self.voxelC)  # voxelized 2D feature용
-        self.fuse_txt = TemporalConcat1x1(256)  # SceneUnder 출력(256채널)용 (카메라 공용)
 
     def create_frustum(self):
         # make grid in image plane
@@ -161,137 +154,64 @@ class BEV_TXT(nn.Module):
 
         return x
 
-    @staticmethod
-    def visualize_bev_feat(bev: torch.Tensor, isBreak: bool = False, mode: str = "entropy"):
-        import numpy as np, matplotlib.pyplot as plt, time, os
-
-        if not os.path.exists("bev_prediction_images"):
-            os.makedirs("bev_prediction_images")
-
-        if mode == "entropy":
-            bev_np = bev[0].permute(1, 2, 0).cpu().numpy()  # [200, 200, 4]
-            exp_bev = np.exp(bev_np - np.max(bev_np, axis=2, keepdims=True))
-            bev_softmax = exp_bev / np.sum(exp_bev, axis=2, keepdims=True)
-            entropy = -np.sum(bev_softmax * np.log(bev_softmax + 1e-8), axis=2)
-            plt.imsave(f"bev_prediction_images/bev_entropy_{time.time()}.png", entropy, cmap="viridis")
-        elif mode == "integer_map":
-            bev_np = bev[0].permute(1, 2, 0).cpu().numpy()  # [200, 200, 4]
-            integer_map = np.argmax(bev_np, axis=2)
-            plt.imsave(f"bev_prediction_images/bev_integer_map_{time.time()}.png", integer_map, cmap="viridis")
-        else:
-            raise ValueError(f"Invalid mode: {mode}")
-
-        if isBreak:
-            raise Exception("Image has been saved.")
-
-    def stage_forward(
-        self,
-        x_single,
-        rots_single,
-        trans_single,
-        intrins_single,
-        post_rots_single,
-        post_trans_single,
-        prev_cache: dict | None,
-    ):
-        """
-        prev_cache: {
-          'bev': Tensor | None,
-          'y_f': Tensor | None, 'y_l1': Tensor | None, 'y_r1': Tensor | None,
-          'y_l2': Tensor | None, 'y_r2': Tensor | None,
-        }
-        """
-        if prev_cache is None:
-            prev_cache = {"bev": None, "y_f": None, "y_l1": None, "y_r1": None, "y_l2": None, "y_r2": None}
-
-        img_feats = self.encoder(x_single)
-
-        # --- BEV 경로 ---
-        vox = self.get_voxels(
-            img_feats,
-            rots_single,
-            trans_single,
-            intrins_single,
-            post_rots_single,
-            post_trans_single,
-        )
-        bev_fused = self.fuse_bev(vox, prev_cache["bev"])
-
-        # --- TXT 경로 ---
-        y_all = self.sceneunder(img_feats)  # [B*N, 256, 8, 22]
-        Ncams = self.data_aug_conf["Ncams"]
-        y_l_1 = y_all[0::Ncams]  # [B, 256, 8, 22]
-        y_f = y_all[1::Ncams]
-        y_r_1 = y_all[2::Ncams]
-        y_l_2 = y_all[3::Ncams]
-        y_r_2 = y_all[5::Ncams]
-
-        y_f_fused = self.fuse_txt(y_f, prev_cache["y_f"])
-        y_l1_fused = self.fuse_txt(y_l_1, prev_cache["y_l1"])
-        y_r1_fused = self.fuse_txt(y_r_1, prev_cache["y_r1"])
-        y_l2_fused = self.fuse_txt(y_l_2, prev_cache["y_l2"])
-        y_r2_fused = self.fuse_txt(y_r_2, prev_cache["y_r2"])
-
-        # 다음 step용 캐시 갱신
-        new_cache = {
-            "bev": bev_fused,
-            "y_f": y_f_fused,
-            "y_l1": y_l1_fused,
-            "y_r1": y_r1_fused,
-            "y_l2": y_l2_fused,
-            "y_r2": y_r2_fused,
-        }
-
-        return bev_fused, new_cache
-
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        T = x.shape[1]
-        cache = None
+        x = self.encoder(x)
 
-        # 시간 순회하며 캐시 융합
-        for t in range(T):
-            bev_fused, cache = self.stage_forward(
-                x[:, t].contiguous(),
-                rots[:, t].contiguous(),
-                trans[:, t].contiguous(),
-                intrins[:, t].contiguous(),
-                post_rots[:, t].contiguous(),
-                post_trans[:, t].contiguous(),
-                cache,
-            )
+        # BEV part
+        y2 = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
+        bev = self.bevencode(y2)
 
-        # 최종(융합된) BEV → seg logits
-        bev_logits = self.bevencode(cache["bev"])  # [B, outC(=4), 200, 200]
-
-        # BEVPost (crop) 추출
-        bev_post = bev_logits.detach()
+        bev_post = bev.detach()
         bev_post = bev_post[:, :, 60:140, 56:144]
         bev_post = self.bevpost(bev_post)
 
-        # === TXT 분기(융합된 최종 feature + bev_post 결합) ===
-        # Front
-        y_f = cache["y_f"]
-        y_f = self.embeder_f1(y_f)  # [B, 32, 8, 22]
-        y_f = torch.cat([y_f, bev_post], dim=1)  # [B, 40, 8, 22]
-        y_f = self.embeder_f2(y_f)  # [B, 40]
-        desc_f = self.predictorf1(y_f)  # [B, 4]
-        act_f = self.predictorf2(y_f)  # [B, 4]
+        # TXT part
+        y1 = self.sceneunder(x)
 
-        # LR (front/back)
-        def lr_head(y_map):
-            y = self.embeder_lr1(y_map)  # [B, 32, 8, 22]
-            y = torch.cat([y, bev_post], dim=1)  # [B, 40, 8, 22]
-            y = self.embeder_lr2(y)  # [B, 40]
-            return self.predictorlr(y)  # [B, 1]
+        # select the features of corresponding cameras
+        y_l_1 = y1[0 :: (self.data_aug_conf["Ncams"]),]
+        y_f = y1[1 :: self.data_aug_conf["Ncams"],]
+        y_r_1 = y1[2 :: (self.data_aug_conf["Ncams"]),]
+        y_l_2 = y1[3 :: (self.data_aug_conf["Ncams"]),]
+        y_r_2 = y1[5 :: (self.data_aug_conf["Ncams"]),]
 
-        desc_l1 = lr_head(cache["y_l1"])
-        desc_r1 = lr_head(cache["y_r1"])
-        desc_l2 = lr_head(cache["y_l2"])
-        desc_r2 = lr_head(cache["y_r2"])
-        desc = torch.cat([desc_f, desc_l1, desc_l2, desc_r1, desc_r2], dim=1)  # [B, 8]
+        # for front camera
+        y_f = self.embeder_f1(y_f)
+        y_f = torch.cat([y_f, bev_post], dim=1)
+        y_f = self.embeder_f2(y_f)
 
-        return bev_logits, act_f, desc
+        desc_f = self.predictorf1(y_f)
+        act_f = self.predictorf2(y_f)
+
+        # for left front cameras
+        y_l_1 = self.embeder_lr1(y_l_1)
+        y_l_1 = torch.cat([y_l_1, bev_post], dim=1)
+        y_l_1 = self.embeder_lr2(y_l_1)
+        desc_l1 = self.predictorlr(y_l_1)
+
+        # for right front cameras
+        y_r_1 = self.embeder_lr1(y_r_1)
+        y_r_1 = torch.cat([y_r_1, bev_post], dim=1)
+        y_r_1 = self.embeder_lr2(y_r_1)
+        desc_r1 = self.predictorlr(y_r_1)
+
+        # for left back cameras
+        y_l_2 = self.embeder_lr1(y_l_2)
+        y_l_2 = torch.cat([y_l_2, bev_post], dim=1)
+        y_l_2 = self.embeder_lr2(y_l_2)
+        desc_l2 = self.predictorlr(y_l_2)
+
+        # for left back cameras
+        y_r_2 = self.embeder_lr1(y_r_2)
+        y_r_2 = torch.cat([y_r_2, bev_post], dim=1)
+        y_r_2 = self.embeder_lr2(y_r_2)
+        desc_r2 = self.predictorlr(y_r_2)
+
+        desc = torch.cat([desc_f, desc_l1, desc_l2, desc_r1, desc_r2], dim=1)
+
+        return bev, act_f, desc
 
 
 def compile_model_bevtxt(bsize, grid_conf, data_aug_conf, outC):
+    # return BEV_TXT(bsize, grid_conf, data_aug_conf, outC)
     return torch.compile(BEV_TXT(bsize, grid_conf, data_aug_conf, outC))

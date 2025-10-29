@@ -12,9 +12,10 @@ conda activate multimodal_xad
 
 nvcc -V
 conda install -c conda-forge cuda-version=12.8.* cuda-nvcc=12.8.* cuda-cudart=12.8.* pyquaternion nuscenes-devkit efficientnet-pytorch 
+conda install -c conda-forge cuda-version=12.8.* pyquaternion nuscenes-devkit efficientnet-pytorch
 nvcc -V
 
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip3 install opencv-python matplotlib tensorboard
 nvcc -V
 

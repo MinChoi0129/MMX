@@ -54,9 +54,7 @@ def get_lidar_data(nusc, sample_rec, nsweeps, min_distance):
 
         # Homogeneous transformation matrix from sensor coordinate frame to ego car frame.
         current_cs_rec = nusc.get("calibrated_sensor", current_sd_rec["calibrated_sensor_token"])
-        car_from_current = transform_matrix(
-            current_cs_rec["translation"], Quaternion(current_cs_rec["rotation"]), inverse=False
-        )
+        car_from_current = transform_matrix(current_cs_rec["translation"], Quaternion(current_cs_rec["rotation"]), inverse=False)
 
         # Fuse four transformation matrices into one and perform transform.
         trans_matrix = reduce(np.dot, [car_from_global, global_from_car, car_from_current])
@@ -228,8 +226,7 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
     total_loss = 0.0
     loader = tqdm(valloader, dynamic_ncols=True, ncols=None, desc="Validation") if use_tqdm else valloader
     with torch.no_grad():
-        for batch in loader:
-            allimgs, rots, trans, intrins, post_rots, post_trans, binimgs = batch
+        for allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, world_pose in loader:
             preds = model(
                 allimgs.to(device),
                 rots.to(device),
@@ -237,6 +234,7 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=True) -> tuple:
                 intrins.to(device),
                 post_rots.to(device),
                 post_trans.to(device),
+                world_pose.to(device),
             )
             # binimgs = binimgs.to(device)
             binimgs = binimgs.to(device)[:, -1, :, :]  # select newest frame
@@ -273,8 +271,7 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
         inference_times = []
         is_time_measure = False
 
-        for batch in loader:
-            allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts_gt, descs_gt = batch
+        for allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, acts_gt, descs_gt, world_pose in loader:
             # visualize_bev_gt(binimgs.to(device))
 
             if is_time_measure:
@@ -288,6 +285,7 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
                     intrins.to(device),
                     post_rots.to(device),
                     post_trans.to(device),
+                    world_pose.to(device),
                 )
                 torch.cuda.synchronize()
                 end_time = time.time()
@@ -300,6 +298,7 @@ def get_val_info_new(model, valloader, device, use_tqdm=True, act_num=4, desc_nu
                     intrins.to(device),
                     post_rots.to(device),
                     post_trans.to(device),
+                    world_pose.to(device),
                 )
             binimgs = binimgs.to(device)[:, -1, :, :]
             acts_gt = acts_gt.to(device)[:, -1, :]

@@ -1,4 +1,5 @@
 import torch
+from torch.optim.lr_scheduler import StepLR
 
 torch.set_float32_matmul_precision("high")
 import numpy as np
@@ -36,7 +37,7 @@ def train(args, grid_conf, data_aug_conf, max_grad_norm):
     print("[Info] Creating log directory...")
     tb_logdir = os.path.join(args.logdir, "tensorboard")
     if not os.path.exists(tb_logdir):
-        os.mkdir(tb_logdir)
+        os.makedirs(tb_logdir)
     writer = SummaryWriter(tb_logdir)
 
     print("[Info] Compiling data...")
@@ -49,13 +50,14 @@ def train(args, grid_conf, data_aug_conf, max_grad_norm):
         nworkers=args.nworkers,
     )
 
-    print("[Info] Compiling model, optimizer...")
+    print("[Info] Compiling model, optimizer, scheduler...")
     model = compile_model_bevtxt(args.bsize, grid_conf, data_aug_conf, outC=args.seg_classes)
     if args.checkpoint:
         model.load_state_dict(torch.load(args.checkpoint), strict=False)
         print("[Info] Loaded checkpoint from {}".format(args.checkpoint))
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
+    scheduler = StepLR(opt, step_size=5, gamma=0.1)
 
     best_metric = -float("inf")
     print("[Info] Start training...")
@@ -85,8 +87,8 @@ def train(args, grid_conf, data_aug_conf, max_grad_norm):
             )
 
             binimgs = binimgs.to(device)[:, -1, :, :]
-            acts = acts.to(device)[:, -1, :]
-            descs = descs.to(device)[:, -1, :]
+            acts = acts.to(device)[:, :]
+            descs = descs.to(device)[:, :]
             loss, loss_bev, loss_act, loss_desc = MultiLoss(bev_pres, act_pres, desc_pres, binimgs, acts, descs, args)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -170,6 +172,7 @@ def train(args, grid_conf, data_aug_conf, max_grad_norm):
             writer.add_scalar("Description_mean", desc_mean, epoch)
 
         model.train()
+        scheduler.step()
 
     writer.close()
 
@@ -184,10 +187,10 @@ def parse_args():
     parser.add_argument("--nepochs", default=60, type=int)
     parser.add_argument("--gpuid", default=0, type=int)
     parser.add_argument("--logdir", default="./logs/train/model_weights/", help="path for the log file")
-    parser.add_argument("--bsize", default=6, type=int)
+    parser.add_argument("--bsize", default=7, type=int)
     parser.add_argument("--nworkers", default=8, type=int)
-    parser.add_argument("--lr", default=1e-4, type=float, help="initial learning rate")
-    parser.add_argument("--wdecay", default=1e-8, type=float, help="weight decay")
+    parser.add_argument("--lr", default=1e-4, type=float, help="initial learning rate")  # 1e-4 이었음
+    parser.add_argument("--wdecay", default=1e-4, type=float, help="weight decay")  # 1e-8 이었음
     parser.add_argument("--checkpoint", default="./logs/pretrain/model_weights/best_model.pt")
     parser.add_argument("--seg_classes", default=4, help="number of class in segmentation")
 
